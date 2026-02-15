@@ -8,8 +8,9 @@ from .webhook import WebhookDispatcher
 
 
 class VoiceListener:
-    def __init__(self, voice_channel_id: int, webhook: WebhookDispatcher) -> None:
+    def __init__(self, target_user_id: int, voice_channel_id: int, webhook: WebhookDispatcher) -> None:
         self._logger = logging.getLogger(__name__)
+        self._target_user_id = target_user_id
         self._voice_channel_id = voice_channel_id
         self._webhook = webhook
 
@@ -39,7 +40,7 @@ class VoiceListener:
         payload = self._build_payload(member=member, guild=guild, channel=channel)
 
         self._logger.info(
-            "Target user joined monitored voice channel",
+            "User joined monitored voice channel",
             extra={
                 "context": {
                     "guild_id": str(guild.id),
