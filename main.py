@@ -26,7 +26,6 @@ def main() -> None:
     )
 
     voice_listener = VoiceListener(
-        target_user_id=settings.target_user_id,
         voice_channel_id=settings.voice_channel_id,
         webhook=webhook_dispatcher,
     )

@@ -8,9 +8,8 @@ from .webhook import WebhookDispatcher
 
 
 class VoiceListener:
-    def __init__(self, target_user_id: int, voice_channel_id: int, webhook: WebhookDispatcher) -> None:
+    def __init__(self, voice_channel_id: int, webhook: WebhookDispatcher) -> None:
         self._logger = logging.getLogger(__name__)
-        self._target_user_id = target_user_id
         self._voice_channel_id = voice_channel_id
         self._webhook = webhook
 
@@ -23,13 +22,12 @@ class VoiceListener:
         old_channel_id = before.channel.id if before.channel else None
         new_channel_id = after.channel.id if after.channel else None
 
-        is_target_user = member.id == self._target_user_id
         entered_target_channel = (
             old_channel_id != self._voice_channel_id
             and new_channel_id == self._voice_channel_id
         )
 
-        if not is_target_user or not entered_target_channel:
+        if not entered_target_channel:
             return
 
         guild = member.guild
