@@ -72,7 +72,7 @@ Se o bot conectar corretamente, voce vera logs indicando conexao ao Gateway.
 2. Suba com Docker Compose:
 
 ```bash
-docker compose up -d --build
+docker compose --env-file .env up -d --build
 ```
 
 3. Acompanhe os logs:
