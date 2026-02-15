@@ -10,6 +10,7 @@ class Settings:
     discord_bot_token: str
     voice_channel_id: int
     webhook_url: str
+    julgar_channel_id: int
     webhook_secret: Optional[str] = None
 
     @classmethod
@@ -19,12 +20,14 @@ class Settings:
         token = _required_env("DISCORD_BOT_TOKEN")
         voice_channel_id = _required_int_env("VOICE_CHANNEL_ID")
         webhook_url = _required_env("WEBHOOK_URL")
+        julgar_channel_id = _required_int_env("JULGAR_CHANNEL_ID")
         webhook_secret = os.getenv("WEBHOOK_SECRET")
 
         return cls(
             discord_bot_token=token,
             voice_channel_id=voice_channel_id,
             webhook_url=webhook_url,
+            julgar_channel_id=julgar_channel_id,
             webhook_secret=webhook_secret,
         )
 

@@ -1,6 +1,6 @@
 # Discord Voice Watcher Bot
 
-Bot em Python que fica conectado ao Gateway do Discord, escuta eventos de voz e envia um webhook HTTP (`POST`) quando qualquer usuario entra em um canal de voz monitorado.
+Bot em Python que fica conectado ao Gateway do Discord, escuta eventos de voz e mensagens de texto, e envia webhooks HTTP (`POST`) para integracao externa.
 
 ## 1) Visao geral
 
@@ -9,6 +9,9 @@ Bot em Python que fica conectado ao Gateway do Discord, escuta eventos de voz e 
 - Dispara `POST` para `WEBHOOK_URL` apenas quando:
   - `old_state.channel_id != VOICE_CHANNEL_ID`
   - `new_state.channel_id == VOICE_CHANNEL_ID`
+- Usa `on_message` para detectar o comando `!julgar` em canal de texto especifico
+- Quando `!julgar` e enviado em `JULGAR_CHANNEL_ID`, busca os primeiros 5 usuarios do servidor
+- Envia uma mensagem no canal com opcoes numeradas para o autor escolher
 - Inclui header opcional `X-Discord-Webhook-Secret`
 - Implementa retry simples em caso de falha no endpoint externo
 
@@ -22,12 +25,18 @@ Bot em Python que fica conectado ao Gateway do Discord, escuta eventos de voz e 
    - Scope: `bot`
    - Permissoes minimas: `View Channels`
 6. Convide o bot para o servidor onde o canal de voz monitorado existe.
+7. Em **Bot > Privileged Gateway Intents**, habilite:
+   - **Message Content Intent**
+   - **Server Members Intent**
 
 ## 3) Permissoes e intents necessarias
 
 - Gateway intents usadas no codigo:
   - `guilds`
   - `voice_states`
+  - `messages`
+  - `message_content`
+  - `members`
 - Permissoes no servidor:
   - `View Channels`
 - O bot nao precisa entrar no canal de voz para monitorar eventos de entrada/saida.
@@ -45,6 +54,7 @@ Variaveis obrigatorias:
 - `DISCORD_BOT_TOKEN`
 - `VOICE_CHANNEL_ID`
 - `WEBHOOK_URL`
+- `JULGAR_CHANNEL_ID`
 
 Variavel opcional:
 
@@ -90,7 +100,7 @@ docker compose down
 ## 6) Observacoes sobre limitacoes da API (texto x voz)
 
 - Presenca e estado de voz sao recebidos via **Gateway events**, nao via REST.
-- Este projeto monitora apenas eventos de **canal de voz** (`on_voice_state_update`).
+- Este projeto monitora eventos de **canal de voz** (`on_voice_state_update`) e comando de **texto** (`on_message`).
 - Nao existe conceito equivalente de "usuario conectado em canal de texto".
 - Alteracoes de mute/deaf nao disparam webhook, porque o filtro exige entrada real no canal monitorado.
 

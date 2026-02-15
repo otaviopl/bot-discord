@@ -2,6 +2,7 @@ import logging
 
 from bot.client import VoiceWatcherClient
 from bot.config import Settings
+from bot.julgar_listener import JulgarListener
 from bot.logger import configure_logging
 from bot.voice_listener import VoiceListener
 from bot.webhook import WebhookDispatcher
@@ -29,8 +30,15 @@ def main() -> None:
         voice_channel_id=settings.voice_channel_id,
         webhook=webhook_dispatcher,
     )
+    julgar_listener = JulgarListener(
+        text_channel_id=settings.julgar_channel_id,
+        adm_voice_channel_id=settings.voice_channel_id,
+    )
 
-    client = VoiceWatcherClient(voice_listener=voice_listener)
+    client = VoiceWatcherClient(
+        voice_listener=voice_listener,
+        julgar_listener=julgar_listener,
+    )
     client.run(settings.discord_bot_token, log_handler=None)
 
 
