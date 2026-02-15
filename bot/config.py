@@ -9,7 +9,6 @@ from dotenv import load_dotenv
 class Settings:
     discord_bot_token: str
     voice_channel_id: int
-    target_user_id: int
     webhook_url: str
     webhook_secret: Optional[str] = None
 
@@ -19,14 +18,12 @@ class Settings:
 
         token = _required_env("DISCORD_BOT_TOKEN")
         voice_channel_id = _required_int_env("VOICE_CHANNEL_ID")
-        target_user_id = _required_int_env("TARGET_USER_ID")
         webhook_url = _required_env("WEBHOOK_URL")
         webhook_secret = os.getenv("WEBHOOK_SECRET")
 
         return cls(
             discord_bot_token=token,
             voice_channel_id=voice_channel_id,
-            target_user_id=target_user_id,
             webhook_url=webhook_url,
             webhook_secret=webhook_secret,
         )

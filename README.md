@@ -1,6 +1,6 @@
 # Discord Voice Watcher Bot
 
-Bot em Python que fica conectado ao Gateway do Discord, escuta eventos de voz e envia um webhook HTTP (`POST`) quando um usuario especifico entra em um canal de voz monitorado.
+Bot em Python que fica conectado ao Gateway do Discord, escuta eventos de voz e envia um webhook HTTP (`POST`) quando qualquer usuario entra em um canal de voz monitorado.
 
 ## 1) Visao geral
 
@@ -9,7 +9,6 @@ Bot em Python que fica conectado ao Gateway do Discord, escuta eventos de voz e 
 - Dispara `POST` para `WEBHOOK_URL` apenas quando:
   - `old_state.channel_id != VOICE_CHANNEL_ID`
   - `new_state.channel_id == VOICE_CHANNEL_ID`
-  - `member.id == TARGET_USER_ID`
 - Inclui header opcional `X-Discord-Webhook-Secret`
 - Implementa retry simples em caso de falha no endpoint externo
 
@@ -19,19 +18,16 @@ Bot em Python que fica conectado ao Gateway do Discord, escuta eventos de voz e 
 2. Crie uma nova aplicacao.
 3. Va em **Bot** e clique em **Add Bot**.
 4. Copie o token do bot para usar em `DISCORD_BOT_TOKEN`.
-5. Em **Privileged Gateway Intents**, habilite:
-   - **Server Members Intent** (necessario para alguns cenarios de identificacao de membros)
-6. Gere o link de convite em **OAuth2 > URL Generator** com:
+5. Gere o link de convite em **OAuth2 > URL Generator** com:
    - Scope: `bot`
    - Permissoes minimas: `View Channels`
-7. Convide o bot para o servidor onde o canal de voz monitorado existe.
+6. Convide o bot para o servidor onde o canal de voz monitorado existe.
 
 ## 3) Permissoes e intents necessarias
 
 - Gateway intents usadas no codigo:
   - `guilds`
   - `voice_states`
-  - `members`
 - Permissoes no servidor:
   - `View Channels`
 - O bot nao precisa entrar no canal de voz para monitorar eventos de entrada/saida.
@@ -48,7 +44,6 @@ Variaveis obrigatorias:
 
 - `DISCORD_BOT_TOKEN`
 - `VOICE_CHANNEL_ID`
-- `TARGET_USER_ID`
 - `WEBHOOK_URL`
 
 Variavel opcional:
@@ -70,6 +65,27 @@ python main.py
 ```
 
 Se o bot conectar corretamente, voce vera logs indicando conexao ao Gateway.
+
+## 5.1) Como rodar com Docker
+
+1. Configure seu `.env` (a partir do `.env.example`).
+2. Suba com Docker Compose:
+
+```bash
+docker compose up -d --build
+```
+
+3. Acompanhe os logs:
+
+```bash
+docker compose logs -f
+```
+
+4. Para parar:
+
+```bash
+docker compose down
+```
 
 ## 6) Observacoes sobre limitacoes da API (texto x voz)
 
@@ -99,7 +115,7 @@ discord-voice-watcher-bot/
 
 ```json
 {
-  "event": "TARGET_USER_JOINED_VOICE_CHANNEL",
+  "event": "USER_JOINED_MONITORED_VOICE_CHANNEL",
   "occurred_at": "ISO-8601",
   "guild": {
     "id": "string",

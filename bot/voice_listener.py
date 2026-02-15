@@ -8,11 +8,14 @@ from .webhook import WebhookDispatcher
 
 
 class VoiceListener:
-    def __init__(self, target_user_id: int, voice_channel_id: int, webhook: WebhookDispatcher) -> None:
+    def __init__(self, voice_channel_id: int, webhook: WebhookDispatcher) -> None:
         self._logger = logging.getLogger(__name__)
-        self._target_user_id = target_user_id
         self._voice_channel_id = voice_channel_id
         self._webhook = webhook
+
+    @property
+    def voice_channel_id(self) -> int:
+        return self._voice_channel_id
 
     async def handle_voice_state_update(
         self,
@@ -59,7 +62,7 @@ class VoiceListener:
         channel: discord.abc.GuildChannel,
     ) -> Dict[str, Any]:
         return {
-            "event": "TARGET_USER_JOINED_VOICE_CHANNEL",
+            "event": "USER_JOINED_MONITORED_VOICE_CHANNEL",
             "occurred_at": datetime.now(timezone.utc).isoformat(),
             "guild": {
                 "id": str(guild.id),

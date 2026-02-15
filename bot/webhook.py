@@ -5,8 +5,8 @@ from typing import Any, Dict, Optional
 
 import httpx
 
-VERIFY_SSL = os.getenv("WEBHOOK_VERIFY_SSL", "true").lower() in ("1", "true", "yes", "y")
-FOLLOW_REDIRECTS = os.getenv("WEBHOOK_FOLLOW_REDIRECTS", "true").lower() in ("1", "true", "yes", "y")
+VERIFY_SSL = False
+FOLLOW_REDIRECTS = True
 
 
 class WebhookDispatcher:
