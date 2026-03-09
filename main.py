@@ -1,5 +1,8 @@
 import logging
 
+from bot.calendar_auth import CalendarAuth
+from bot.calendar_client import CalendarClient
+from bot.calendar_listener import CalendarListener
 from bot.client import VoiceWatcherClient
 from bot.config import Settings
 from bot.julgar_listener import JulgarListener
@@ -35,9 +38,35 @@ def main() -> None:
         adm_voice_channel_id=settings.voice_channel_id,
     )
 
+    calendar_listener = None
+    if settings.google_client_id and settings.google_client_secret:
+        calendar_auth = CalendarAuth(
+            client_id=settings.google_client_id,
+            client_secret=settings.google_client_secret,
+            redirect_uri=settings.calendar_redirect_uri,
+        )
+        calendar_client = CalendarClient(
+            auth=calendar_auth,
+            timezone=settings.calendar_timezone,
+        )
+        calendar_channel_id = settings.calendar_channel_id or settings.julgar_channel_id
+        calendar_listener = CalendarListener(
+            auth=calendar_auth,
+            calendar_client=calendar_client,
+            channel_id=calendar_channel_id,
+            oauth_port=settings.calendar_oauth_port,
+        )
+        logger.info(
+            "Google Calendar integration enabled",
+            extra={"context": {"channel_id": str(calendar_channel_id)}},
+        )
+    else:
+        logger.info("Google Calendar integration disabled (GOOGLE_CLIENT_ID/GOOGLE_CLIENT_SECRET not set)")
+
     client = VoiceWatcherClient(
         voice_listener=voice_listener,
         julgar_listener=julgar_listener,
+        calendar_listener=calendar_listener,
     )
     client.run(settings.discord_bot_token, log_handler=None)
 

@@ -12,6 +12,13 @@ class Settings:
     webhook_url: str
     julgar_channel_id: int
     webhook_secret: Optional[str] = None
+    # Google Calendar (opcional)
+    google_client_id: Optional[str] = None
+    google_client_secret: Optional[str] = None
+    calendar_channel_id: Optional[int] = None
+    calendar_redirect_uri: str = "http://localhost:8080/oauth2callback"
+    calendar_oauth_port: int = 8080
+    calendar_timezone: str = "America/Sao_Paulo"
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -23,12 +30,30 @@ class Settings:
         julgar_channel_id = _required_int_env("JULGAR_CHANNEL_ID")
         webhook_secret = os.getenv("WEBHOOK_SECRET")
 
+        google_client_id = os.getenv("GOOGLE_CLIENT_ID") or None
+        google_client_secret = os.getenv("GOOGLE_CLIENT_SECRET") or None
+        calendar_channel_id_raw = os.getenv("CALENDAR_CHANNEL_ID")
+        calendar_channel_id = int(calendar_channel_id_raw) if calendar_channel_id_raw else None
+        calendar_redirect_uri = os.getenv("CALENDAR_REDIRECT_URI", "http://localhost:8080/oauth2callback")
+        calendar_oauth_port_raw = os.getenv("CALENDAR_OAUTH_PORT", "8080")
+        try:
+            calendar_oauth_port = int(calendar_oauth_port_raw)
+        except ValueError:
+            calendar_oauth_port = 8080
+        calendar_timezone = os.getenv("CALENDAR_TIMEZONE", "America/Sao_Paulo")
+
         return cls(
             discord_bot_token=token,
             voice_channel_id=voice_channel_id,
             webhook_url=webhook_url,
             julgar_channel_id=julgar_channel_id,
             webhook_secret=webhook_secret,
+            google_client_id=google_client_id,
+            google_client_secret=google_client_secret,
+            calendar_channel_id=calendar_channel_id,
+            calendar_redirect_uri=calendar_redirect_uri,
+            calendar_oauth_port=calendar_oauth_port,
+            calendar_timezone=calendar_timezone,
         )
 
 

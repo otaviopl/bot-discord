@@ -34,3 +34,6 @@ htmlcov/
 # OS files
 .DS_Store
 Thumbs.db
+
+# Google OAuth token (contém credenciais sensíveis)
+calendar_token.json
