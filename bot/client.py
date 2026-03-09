@@ -1,13 +1,20 @@
 import logging
+from typing import Optional
 
 import discord
 
+from .calendar_listener import CalendarListener
 from .julgar_listener import JulgarListener
 from .voice_listener import VoiceListener
 
 
 class VoiceWatcherClient(discord.Client):
-    def __init__(self, voice_listener: VoiceListener, julgar_listener: JulgarListener) -> None:
+    def __init__(
+        self,
+        voice_listener: VoiceListener,
+        julgar_listener: JulgarListener,
+        calendar_listener: Optional[CalendarListener] = None,
+    ) -> None:
         intents = discord.Intents.none()
         intents.guilds = True
         intents.voice_states = True
@@ -19,6 +26,7 @@ class VoiceWatcherClient(discord.Client):
         self._logger = logging.getLogger(__name__)
         self._voice_listener = voice_listener
         self._julgar_listener = julgar_listener
+        self._calendar_listener = calendar_listener
 
     async def on_ready(self) -> None:
         user_display = f"{self.user} ({self.user.id})" if self.user else "unknown"
@@ -49,6 +57,8 @@ class VoiceWatcherClient(discord.Client):
 
     async def on_message(self, message: discord.Message) -> None:
         await self._julgar_listener.handle_message(self, message)
+        if self._calendar_listener is not None:
+            await self._calendar_listener.handle_message(self, message)
 
     async def _log_monitored_channel_status(self) -> None:
         monitored_channel_id = self._voice_listener.voice_channel_id
