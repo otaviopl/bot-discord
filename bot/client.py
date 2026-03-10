@@ -19,6 +19,7 @@ class VoiceWatcherClient(discord.Client):
         intents.guilds = True
         intents.voice_states = True
         intents.messages = True
+        intents.dm_messages = True
         intents.message_content = True
         intents.members = True
 

@@ -32,7 +32,8 @@ class CalendarListener:
         if message.author.bot:
             return
 
-        if message.channel.id != self._channel_id:
+        is_dm = isinstance(message.channel, discord.DMChannel)
+        if not is_dm and message.channel.id != self._channel_id:
             return
 
         content = message.content.strip().lower()
@@ -63,7 +64,9 @@ class CalendarListener:
     # ------------------------------------------------------------------ #
 
     async def _handle_auth(self, message: discord.Message) -> None:
-        if not isinstance(message.author, discord.Member) or not message.author.guild_permissions.administrator:
+        is_dm = isinstance(message.channel, discord.DMChannel)
+        is_admin = isinstance(message.author, discord.Member) and message.author.guild_permissions.administrator
+        if not is_dm and not is_admin:
             self._logger.warning(
                 "Non-admin user attempted !calendario-auth",
                 extra={"context": {"user_id": str(message.author.id), "user_name": str(message.author)}},
