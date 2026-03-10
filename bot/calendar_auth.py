@@ -95,7 +95,7 @@ class CalendarAuth:
 
     def _create_flow(self) -> Flow:
         client_config = {
-            "web": {
+            "installed": {
                 "client_id": self._client_id,
                 "client_secret": self._client_secret,
                 "redirect_uris": [self._redirect_uri],
