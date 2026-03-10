@@ -37,6 +37,18 @@ class CalendarListener:
 
         content = message.content.strip().lower()
 
+        if content in ("!calendario-auth", "!eventos", "!agendar", "!cancelar"):
+            self._logger.info(
+                "Calendar command received",
+                extra={
+                    "context": {
+                        "command": content,
+                        "user_id": str(message.author.id),
+                        "user_name": str(message.author),
+                    }
+                },
+            )
+
         if content == "!calendario-auth":
             await self._handle_auth(message)
         elif content == "!eventos":
@@ -52,11 +64,19 @@ class CalendarListener:
 
     async def _handle_auth(self, message: discord.Message) -> None:
         if not isinstance(message.author, discord.Member) or not message.author.guild_permissions.administrator:
+            self._logger.warning(
+                "Non-admin user attempted !calendario-auth",
+                extra={"context": {"user_id": str(message.author.id), "user_name": str(message.author)}},
+            )
             await message.channel.send(
                 f"{message.author.mention} apenas administradores podem usar `!calendario-auth`."
             )
             return
 
+        self._logger.info(
+            "Starting OAuth flow",
+            extra={"context": {"user_id": str(message.author.id), "oauth_port": self._oauth_port}},
+        )
         auth_url = self._auth.get_auth_url()
         await message.channel.send(
             f"{message.author.mention} acesse o link abaixo para autorizar o Google Calendar:\n"
@@ -64,8 +84,10 @@ class CalendarListener:
             f"Aguardando autorizacao (5 minutos)..."
         )
 
+        self._logger.info("Waiting for OAuth callback", extra={"context": {"port": self._oauth_port}})
         code = await self._auth.wait_for_callback(port=self._oauth_port, timeout=300.0)
         if code is None:
+            self._logger.warning("OAuth flow timed out, no code received")
             await message.channel.send(
                 f"{message.author.mention} tempo esgotado. Use `!calendario-auth` novamente."
             )
@@ -73,6 +95,7 @@ class CalendarListener:
 
         try:
             await self._auth.exchange_code(code)
+            self._logger.info("OAuth flow completed successfully")
             await message.channel.send(
                 f"{message.author.mention} Google Calendar autorizado com sucesso!"
             )
@@ -91,12 +114,14 @@ class CalendarListener:
 
     async def _handle_list_events(self, message: discord.Message) -> None:
         if not self._auth.is_authenticated():
+            self._logger.warning("!eventos called but bot is not authenticated")
             await message.channel.send(
                 f"{message.author.mention} o bot nao esta autenticado no Google Calendar. "
                 "Um administrador deve usar `!calendario-auth` primeiro."
             )
             return
 
+        self._logger.info("Fetching calendar events for next 7 days")
         try:
             events = await self._calendar.list_events(days=7)
         except Exception as exc:
@@ -107,6 +132,7 @@ class CalendarListener:
             await message.channel.send(f"{message.author.mention} falha ao buscar eventos do Calendar.")
             return
 
+        self._logger.info("Calendar events fetched", extra={"context": {"count": len(events)}})
         if not events:
             await message.channel.send(
                 f"{message.author.mention} nenhum evento nos proximos 7 dias."
@@ -191,6 +217,10 @@ class CalendarListener:
         except asyncio.TimeoutError:
             pass  # usa o padrao
 
+        self._logger.info(
+            "Creating calendar event",
+            extra={"context": {"title": title, "start_dt": str(start_dt), "duration_minutes": duration}},
+        )
         try:
             event = await self._calendar.create_event(
                 title=title,
@@ -199,6 +229,10 @@ class CalendarListener:
             )
             event_link = event.get("htmlLink", "")
             formatted_start = _format_datetime(event["start"].get("dateTime", ""))
+            self._logger.info(
+                "Calendar event created",
+                extra={"context": {"event_id": event.get("id"), "title": title}},
+            )
             await channel.send(
                 f"{author.mention} evento **{title}** criado para {formatted_start}.\n{event_link}"
             )
@@ -277,8 +311,13 @@ class CalendarListener:
                     break
             await channel.send(f"{author.mention} escolha um numero entre 1 e {len(events)}.")
 
+        self._logger.info(
+            "Deleting calendar event",
+            extra={"context": {"event_id": selected["id"], "title": selected.get("summary")}},
+        )
         try:
             await self._calendar.delete_event(selected["id"])
+            self._logger.info("Calendar event deleted", extra={"context": {"event_id": selected["id"]}})
             await channel.send(
                 f"{author.mention} evento **{selected.get('summary', '?')}** cancelado com sucesso."
             )

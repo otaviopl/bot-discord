@@ -22,24 +22,39 @@ class CalendarAuth:
     def get_credentials(self) -> Optional[Credentials]:
         try:
             creds = Credentials.from_authorized_user_file(TOKEN_FILE, SCOPES)
-        except (FileNotFoundError, ValueError):
+        except FileNotFoundError:
+            self._logger.debug("Token file not found, not authenticated")
+            return None
+        except ValueError as exc:
+            self._logger.warning("Token file invalid", extra={"context": {"error": str(exc)}})
             return None
 
         if creds.expired and creds.refresh_token:
+            self._logger.info("Access token expired, refreshing")
             try:
                 creds.refresh(Request())
                 self._save_credentials(creds)
-            except Exception:
+                self._logger.info("Token refreshed successfully")
+            except Exception as exc:
+                self._logger.error("Failed to refresh token", extra={"context": {"error": str(exc)}})
                 return None
 
-        return creds if creds.valid else None
+        if not creds.valid:
+            self._logger.warning("Credentials exist but are not valid")
+            return None
+
+        return creds
 
     def is_authenticated(self) -> bool:
         return self.get_credentials() is not None
 
     def get_auth_url(self) -> str:
         flow = self._create_flow()
-        auth_url, _ = flow.authorization_url(prompt="consent", access_type="offline")
+        auth_url, state = flow.authorization_url(prompt="consent", access_type="offline")
+        self._logger.info(
+            "OAuth authorization URL generated",
+            extra={"context": {"state": state, "redirect_uri": self._redirect_uri}},
+        )
         return auth_url
 
     async def wait_for_callback(self, port: int, timeout: float = 300.0) -> Optional[str]:
@@ -76,8 +91,11 @@ class CalendarAuth:
         )
 
         try:
-            return await asyncio.wait_for(code_future, timeout=timeout)
+            code = await asyncio.wait_for(code_future, timeout=timeout)
+            self._logger.info("OAuth authorization code received")
+            return code
         except asyncio.TimeoutError:
+            self._logger.warning("OAuth callback timed out waiting for authorization code")
             return None
         finally:
             server.close()
@@ -85,10 +103,15 @@ class CalendarAuth:
             self._logger.info("OAuth callback server stopped")
 
     async def exchange_code(self, code: str) -> Credentials:
+        self._logger.info("Exchanging OAuth code for token")
         flow = self._create_flow()
         loop = asyncio.get_event_loop()
         await loop.run_in_executor(None, lambda: flow.fetch_token(code=code))
         creds = flow.credentials
+        self._logger.info(
+            "OAuth token obtained",
+            extra={"context": {"has_refresh_token": bool(creds.refresh_token), "expiry": str(creds.expiry)}},
+        )
         self._save_credentials(creds)
         self._logger.info("OAuth credentials saved successfully")
         return creds
