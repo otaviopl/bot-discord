@@ -24,7 +24,8 @@ class JulgarListener:
         if message.author.bot:
             return
 
-        if message.channel.id != self._text_channel_id:
+        is_dm = isinstance(message.channel, discord.DMChannel)
+        if not is_dm and message.channel.id != self._text_channel_id:
             return
 
         content = message.content.strip().lower()
@@ -41,6 +42,7 @@ class JulgarListener:
 
         guild = message.guild
         if guild is None:
+            await message.channel.send("O comando `!julgar` so funciona em servidores.")
             return
 
         session_key = (message.channel.id, message.author.id)
