@@ -1,11 +1,15 @@
 import logging
-from typing import Optional
+from datetime import datetime, timezone
+from typing import Optional, Set
 
 import discord
 from discord import app_commands
 
+from .calendar_listener import CalendarListener
 from .julgar_listener import JulgarListener
 from .notion_client import NotionClient
+from .task_views import CreateTaskModal, StopTimerSelectView
+from .timer_manager import TimerManager
 from .voice_listener import VoiceListener
 
 STATUS_INDICATORS = {
@@ -22,11 +26,14 @@ class VoiceWatcherClient(discord.Client):
         voice_listener: VoiceListener,
         julgar_listener: JulgarListener,
         notion_client: Optional[NotionClient] = None,
+        timer_manager: Optional[TimerManager] = None,
+        calendar_listener: Optional[CalendarListener] = None,
     ) -> None:
         intents = discord.Intents.none()
         intents.guilds = True
         intents.voice_states = True
         intents.messages = True
+        intents.dm_messages = True
         intents.message_content = True
         intents.members = True
 
@@ -35,13 +42,90 @@ class VoiceWatcherClient(discord.Client):
         self._voice_listener = voice_listener
         self._julgar_listener = julgar_listener
         self._notion_client = notion_client
+        self._timer_manager = timer_manager or TimerManager()
+        self._calendar_listener = calendar_listener
+        self._status_options_cache: Optional[list] = None
+        self._dm_log_subscribers: Set[int] = set()
         self.tree = app_commands.CommandTree(self)
         self._register_commands()
+
+    async def _get_status_options(self) -> list:
+        if self._status_options_cache:
+            return self._status_options_cache
+        if self._notion_client:
+            try:
+                self._status_options_cache = await self._notion_client.fetch_status_options()
+            except Exception:
+                self._status_options_cache = ["Not started", "In progress", "Done"]
+        else:
+            self._status_options_cache = ["Not started", "In progress", "Done"]
+        return self._status_options_cache
 
     def _register_commands(self) -> None:
         @self.tree.command(name="tasks", description="Lista suas tarefas do Notion")
         async def tasks_command(interaction: discord.Interaction) -> None:
             await self._handle_tasks(interaction)
+
+        @self.tree.command(name="create-task", description="Cria uma nova tarefa no Notion")
+        async def create_task_command(interaction: discord.Interaction) -> None:
+            await self._handle_create_task(interaction)
+
+        @self.tree.command(name="stop-timer", description="Para um cronômetro ativo e salva o tempo")
+        async def stop_timer_command(interaction: discord.Interaction) -> None:
+            await self._handle_stop_timer(interaction)
+
+        @self.tree.command(name="logs", description="Ativa/desativa logs de comandos no seu DM")
+        @app_commands.describe(enabled="Ativar (True) ou desativar (False) os logs no DM")
+        async def logs_command(interaction: discord.Interaction, enabled: bool) -> None:
+            await self._handle_logs_toggle(interaction, enabled)
+
+    async def _handle_logs_toggle(self, interaction: discord.Interaction, enabled: bool) -> None:
+        if enabled:
+            self._dm_log_subscribers.add(interaction.user.id)
+            await interaction.response.send_message(
+                "Logs ativados. Você receberá notificações no DM sobre comandos recebidos.",
+                ephemeral=True,
+            )
+        else:
+            self._dm_log_subscribers.discard(interaction.user.id)
+            await interaction.response.send_message(
+                "Logs desativados.", ephemeral=True
+            )
+
+    async def _notify_dm_log(self, interaction: discord.Interaction) -> None:
+        if not self._dm_log_subscribers:
+            return
+
+        cmd_name = interaction.command.qualified_name if interaction.command else "unknown"
+        user = interaction.user
+        channel_info = (
+            f"DM" if interaction.guild is None
+            else f"#{interaction.channel.name if interaction.channel else '?'} ({interaction.guild.name})"
+        )
+        now = datetime.now(timezone.utc).strftime("%H:%M:%S UTC")
+
+        log_msg = (
+            f"```\n"
+            f"[{now}] /{cmd_name}\n"
+            f"User:    {user} ({user.id})\n"
+            f"Channel: {channel_info}\n"
+            f"```"
+        )
+
+        for uid in list(self._dm_log_subscribers):
+            try:
+                dm_user = self.get_user(uid) or await self.fetch_user(uid)
+                dm_channel = dm_user.dm_channel or await dm_user.create_dm()
+                await dm_channel.send(log_msg)
+            except Exception as exc:
+                self._logger.warning(
+                    "Failed to send DM log",
+                    extra={"context": {"user_id": uid, "error": str(exc)}},
+                )
+
+    async def on_interaction(self, interaction: discord.Interaction) -> None:
+        if interaction.type == discord.InteractionType.application_command:
+            await self._notify_dm_log(interaction)
 
     async def _handle_tasks(self, interaction: discord.Interaction) -> None:
         if not self._notion_client:
@@ -76,6 +160,49 @@ class VoiceWatcherClient(discord.Client):
         embeds = self._build_task_embeds(tasks)
         for i in range(0, len(embeds), 10):
             await interaction.followup.send(embeds=embeds[i : i + 10], ephemeral=True)
+
+    async def _handle_create_task(self, interaction: discord.Interaction) -> None:
+        if not self._notion_client:
+            await interaction.response.send_message(
+                "Notion não está configurado. Defina `NOTION_TOKEN` e `NOTION_DATABASE_ID`.",
+                ephemeral=True,
+            )
+            return
+
+        status_options = await self._get_status_options()
+        modal = CreateTaskModal(
+            notion_client=self._notion_client,
+            timer_manager=self._timer_manager,
+            status_options=status_options,
+        )
+        await interaction.response.send_modal(modal)
+
+    async def _handle_stop_timer(self, interaction: discord.Interaction) -> None:
+        if not self._notion_client:
+            await interaction.response.send_message(
+                "Notion não está configurado.", ephemeral=True
+            )
+            return
+
+        active = self._timer_manager.get_active(interaction.user.id)
+        if not active:
+            await interaction.response.send_message(
+                "Você não tem nenhum cronômetro ativo.", ephemeral=True
+            )
+            return
+
+        status_options = await self._get_status_options()
+        view = StopTimerSelectView(
+            notion_client=self._notion_client,
+            timer_manager=self._timer_manager,
+            status_options=status_options,
+            user_id=interaction.user.id,
+        )
+        await interaction.response.send_message(
+            f"Você tem **{len(active)}** cronômetro(s) ativo(s). Qual deseja parar?",
+            view=view,
+            ephemeral=True,
+        )
 
     def _build_task_embeds(self, tasks: list) -> list:
         chunk_size = 10
@@ -149,6 +276,8 @@ class VoiceWatcherClient(discord.Client):
 
     async def on_message(self, message: discord.Message) -> None:
         await self._julgar_listener.handle_message(self, message)
+        if self._calendar_listener is not None:
+            await self._calendar_listener.handle_message(self, message)
 
     async def _log_monitored_channel_status(self) -> None:
         monitored_channel_id = self._voice_listener.voice_channel_id
@@ -259,4 +388,3 @@ class VoiceWatcherClient(discord.Client):
                 }
             },
         )
-
