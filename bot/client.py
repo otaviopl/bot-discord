@@ -1,13 +1,28 @@
 import logging
+from typing import Optional
 
 import discord
+from discord import app_commands
 
 from .julgar_listener import JulgarListener
+from .notion_client import NotionClient
 from .voice_listener import VoiceListener
+
+STATUS_INDICATORS = {
+    "Not started": "⬜",
+    "In progress": "🔵",
+    "Done": "✅",
+}
+DEFAULT_STATUS_INDICATOR = "⚪"
 
 
 class VoiceWatcherClient(discord.Client):
-    def __init__(self, voice_listener: VoiceListener, julgar_listener: JulgarListener) -> None:
+    def __init__(
+        self,
+        voice_listener: VoiceListener,
+        julgar_listener: JulgarListener,
+        notion_client: Optional[NotionClient] = None,
+    ) -> None:
         intents = discord.Intents.none()
         intents.guilds = True
         intents.voice_states = True
@@ -19,6 +34,91 @@ class VoiceWatcherClient(discord.Client):
         self._logger = logging.getLogger(__name__)
         self._voice_listener = voice_listener
         self._julgar_listener = julgar_listener
+        self._notion_client = notion_client
+        self.tree = app_commands.CommandTree(self)
+        self._register_commands()
+
+    def _register_commands(self) -> None:
+        @self.tree.command(name="tasks", description="Lista suas tarefas do Notion")
+        async def tasks_command(interaction: discord.Interaction) -> None:
+            await self._handle_tasks(interaction)
+
+    async def _handle_tasks(self, interaction: discord.Interaction) -> None:
+        if not self._notion_client:
+            await interaction.response.send_message(
+                "Notion não está configurado. Defina `NOTION_TOKEN` e `NOTION_DATABASE_ID` nas variáveis de ambiente.",
+                ephemeral=True,
+            )
+            return
+
+        await interaction.response.defer(ephemeral=True)
+
+        try:
+            tasks = await self._notion_client.fetch_tasks()
+        except Exception as exc:
+            self._logger.error(
+                "Failed to fetch Notion tasks",
+                extra={"context": {"error": str(exc)}},
+            )
+            await interaction.followup.send(
+                f"Erro ao buscar tarefas do Notion: `{exc}`",
+                ephemeral=True,
+            )
+            return
+
+        if not tasks:
+            await interaction.followup.send(
+                "Nenhuma tarefa encontrada no banco de dados.",
+                ephemeral=True,
+            )
+            return
+
+        embeds = self._build_task_embeds(tasks)
+        for i in range(0, len(embeds), 10):
+            await interaction.followup.send(embeds=embeds[i : i + 10], ephemeral=True)
+
+    def _build_task_embeds(self, tasks: list) -> list:
+        chunk_size = 10
+        embeds = []
+
+        for i in range(0, len(tasks), chunk_size):
+            chunk = tasks[i : i + chunk_size]
+            lines = []
+            for task in chunk:
+                indicator = STATUS_INDICATORS.get(
+                    task["property_status"], DEFAULT_STATUS_INDICATOR
+                )
+                line = f"{indicator} **[{task['name']}]({task['url']})**"
+                line += f"\n    Status: `{task['property_status'] or 'N/A'}`"
+                if task["property_due"]:
+                    line += f" · Prazo: `{task['property_due']}`"
+                if task["property_description"]:
+                    desc = task["property_description"][:100]
+                    line += f"\n    {desc}"
+                lines.append(line)
+
+            total = len(tasks)
+            page = (i // chunk_size) + 1
+            total_pages = (total + chunk_size - 1) // chunk_size
+            title = f"📋 Tarefas Notion ({total})"
+            if total_pages > 1:
+                title += f" — página {page}/{total_pages}"
+
+            embed = discord.Embed(
+                title=title,
+                description="\n\n".join(lines),
+                color=discord.Color.blurple(),
+            )
+            embeds.append(embed)
+
+        return embeds
+
+    async def setup_hook(self) -> None:
+        synced = await self.tree.sync()
+        self._logger.info(
+            "Slash commands synced",
+            extra={"context": {"commands": [c.name for c in synced]}},
+        )
 
     async def on_ready(self) -> None:
         user_display = f"{self.user} ({self.user.id})" if self.user else "unknown"

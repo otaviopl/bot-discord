@@ -4,6 +4,7 @@ from bot.client import VoiceWatcherClient
 from bot.config import Settings
 from bot.julgar_listener import JulgarListener
 from bot.logger import configure_logging
+from bot.notion_client import NotionClient
 from bot.voice_listener import VoiceListener
 from bot.webhook import WebhookDispatcher
 
@@ -35,9 +36,22 @@ def main() -> None:
         adm_voice_channel_id=settings.voice_channel_id,
     )
 
+    notion_client = None
+    if settings.notion_token and settings.notion_database_id:
+        notion_client = NotionClient(
+            token=settings.notion_token,
+            database_id=settings.notion_database_id,
+        )
+        logger.info("Notion integration enabled")
+    else:
+        logger.warning(
+            "Notion integration disabled (NOTION_TOKEN or NOTION_DATABASE_ID not set)"
+        )
+
     client = VoiceWatcherClient(
         voice_listener=voice_listener,
         julgar_listener=julgar_listener,
+        notion_client=notion_client,
     )
     client.run(settings.discord_bot_token, log_handler=None)
 

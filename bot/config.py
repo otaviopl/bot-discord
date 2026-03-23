@@ -12,6 +12,8 @@ class Settings:
     webhook_url: str
     julgar_channel_id: int
     webhook_secret: Optional[str] = None
+    notion_token: Optional[str] = None
+    notion_database_id: Optional[str] = None
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -22,6 +24,8 @@ class Settings:
         webhook_url = _required_env("WEBHOOK_URL")
         julgar_channel_id = _required_int_env("JULGAR_CHANNEL_ID")
         webhook_secret = os.getenv("WEBHOOK_SECRET")
+        notion_token = os.getenv("NOTION_TOKEN")
+        notion_database_id = os.getenv("NOTION_DATABASE_ID")
 
         return cls(
             discord_bot_token=token,
@@ -29,6 +33,8 @@ class Settings:
             webhook_url=webhook_url,
             julgar_channel_id=julgar_channel_id,
             webhook_secret=webhook_secret,
+            notion_token=notion_token,
+            notion_database_id=notion_database_id,
         )
 
 
