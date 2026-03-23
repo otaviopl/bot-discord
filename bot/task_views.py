@@ -125,6 +125,65 @@ class StartTimerView(discord.ui.View):
 
 
 # ---------------------------------------------------------------------------
+# !start-timer flow (existing tasks)
+# ---------------------------------------------------------------------------
+
+class StartTimerFromListView(discord.ui.View):
+    def __init__(
+        self,
+        timer_manager: TimerManager,
+        tasks_list: list,
+    ) -> None:
+        super().__init__(timeout=120)
+        self._timer = timer_manager
+        self._tasks_by_id = {t["id"]: t for t in tasks_list}
+
+        select = discord.ui.Select(
+            placeholder="Selecione a tarefa...",
+            options=[
+                discord.SelectOption(
+                    label=t["name"][:100],
+                    value=t["id"],
+                    description=(t.get("property_status") or "Sem status")[:100],
+                )
+                for t in tasks_list[:25]
+            ],
+        )
+        select.callback = self._on_select
+        self.add_item(select)
+
+    async def _on_select(self, interaction: discord.Interaction) -> None:
+        task_id = interaction.data["values"][0]  # type: ignore[index]
+        task = self._tasks_by_id.get(task_id)
+        if not task:
+            await interaction.response.send_message(
+                embed=discord.Embed(title="❌ Tarefa não encontrada", color=discord.Color.red()),
+            )
+            self.stop()
+            return
+
+        entry = self._timer.start(
+            user_id=interaction.user.id,
+            task_id=task["id"],
+            task_name=task["name"],
+            task_url=task.get("url", ""),
+        )
+
+        embed = discord.Embed(
+            title="⏱️ Cronômetro iniciado",
+            color=discord.Color.green(),
+            timestamp=datetime.now(timezone.utc),
+        )
+        embed.add_field(name="Tarefa", value=f"**[{entry.task_name}]({entry.task_url})**", inline=False)
+        status = task.get("property_status") or "N/A"
+        embed.add_field(name="Status atual", value=f"`{status}`", inline=True)
+        embed.set_footer(text="Use !stop-timer para parar")
+
+        await interaction.response.send_message(embed=embed)
+        self.stop()
+
+
+# ---------------------------------------------------------------------------
 # !stop-timer flow
 # ---------------------------------------------------------------------------
 

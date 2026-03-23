@@ -22,7 +22,7 @@ from .shift_manager import (
     serialize_entries,
 )
 from .shift_views import ShiftEditView
-from .task_views import StatusSelectView, StopTimerSelectView
+from .task_views import StartTimerFromListView, StatusSelectView, StopTimerSelectView
 from .timer_manager import TimerManager
 from .voice_listener import VoiceListener
 
@@ -48,7 +48,10 @@ def _build_help_embed() -> discord.Embed:
     )
     embed.add_field(
         name="⏱️ Cronômetro",
-        value="`!stop-timer` — Para um cronômetro ativo",
+        value=(
+            "`!start-timer` — Inicia cronômetro para uma tarefa existente\n"
+            "`!stop-timer` — Para um cronômetro ativo"
+        ),
         inline=False,
     )
     embed.add_field(
@@ -201,6 +204,9 @@ class VoiceWatcherClient(discord.Client):
         elif cmd == "!create-task":
             await self._notify_dm_log(message, "!create-task")
             await self._handle_create_task_dm(message)
+        elif cmd == "!start-timer":
+            await self._notify_dm_log(message, "!start-timer")
+            await self._handle_start_timer_dm(message)
         elif cmd == "!stop-timer":
             await self._notify_dm_log(message, "!stop-timer")
             await self._handle_stop_timer_dm(message)
@@ -309,6 +315,38 @@ class VoiceWatcherClient(discord.Client):
             color=discord.Color.blurple(),
         )
         await channel.send(embed=status_embed, view=view)
+
+    # ------------------------------------------------------------------
+    # !start-timer (existing tasks)
+    # ------------------------------------------------------------------
+
+    async def _handle_start_timer_dm(self, message: discord.Message) -> None:
+        if not self._notion_client:
+            await message.channel.send(embed=_embed_error("❌ Notion não configurado"))
+            return
+
+        try:
+            task_list = await self._notion_client.fetch_tasks()
+        except Exception as exc:
+            self._logger.error("Failed to fetch tasks for timer", extra={"context": {"error": str(exc)}})
+            await message.channel.send(embed=_embed_error("❌ Erro ao buscar tarefas", f"```{exc}```"))
+            return
+
+        if not task_list:
+            await message.channel.send(embed=_embed_info("Nenhuma tarefa encontrada no Notion."))
+            return
+
+        view = StartTimerFromListView(
+            timer_manager=self._timer_manager,
+            tasks_list=task_list,
+        )
+
+        embed = discord.Embed(
+            title="⏱️ Iniciar cronômetro",
+            description=f"Selecione uma das **{len(task_list)}** tarefas abaixo:",
+            color=discord.Color.blurple(),
+        )
+        await message.channel.send(embed=embed, view=view)
 
     # ------------------------------------------------------------------
     # !stop-timer
