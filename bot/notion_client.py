@@ -8,10 +8,16 @@ NOTION_VERSION = "2022-06-28"
 
 
 class NotionClient:
-    def __init__(self, token: str, database_id: str) -> None:
+    def __init__(
+        self,
+        token: str,
+        database_id: str,
+        shifts_database_id: Optional[str] = None,
+    ) -> None:
         self._logger = logging.getLogger(__name__)
         self._token = token
         self._database_id = database_id
+        self._shifts_database_id = shifts_database_id
         self._headers = {
             "Authorization": f"Bearer {token}",
             "Notion-Version": NOTION_VERSION,
@@ -82,22 +88,43 @@ class NotionClient:
 
         return self._parse_page(page)
 
+    async def _fetch_page_time_min(self, page_id: str) -> int:
+        url = f"{NOTION_API_BASE}/pages/{page_id}"
+
+        async with httpx.AsyncClient(timeout=httpx.Timeout(15.0)) as client:
+            response = await client.get(url, headers=self._headers)
+            response.raise_for_status()
+            page = response.json()
+
+        properties = page.get("properties", {})
+        for key in ("time_min", "Time_min", "time"):
+            prop = properties.get(key)
+            if prop and prop.get("type") == "number":
+                return prop.get("number") or 0
+        return 0
+
     async def update_task(
         self,
         page_id: str,
         time_min: Optional[int] = None,
         status: Optional[str] = None,
-    ) -> None:
+    ) -> int:
+        """Returns the new total time_min after summing."""
         url = f"{NOTION_API_BASE}/pages/{page_id}"
 
         properties: Dict[str, Any] = {}
+        total_time = 0
+
         if time_min is not None:
-            properties["time_min"] = {"number": time_min}
+            current = await self._fetch_page_time_min(page_id)
+            total_time = current + time_min
+            properties["time_min"] = {"number": total_time}
+
         if status is not None:
             properties["status"] = {"status": {"name": status}}
 
         if not properties:
-            return
+            return total_time
 
         try:
             async with httpx.AsyncClient(timeout=httpx.Timeout(15.0)) as client:
@@ -117,6 +144,8 @@ class NotionClient:
                 },
             )
             raise
+
+        return total_time
 
     async def fetch_tasks(self) -> List[Dict[str, Any]]:
         url = f"{NOTION_API_BASE}/databases/{self._database_id}/query"
@@ -145,6 +174,66 @@ class NotionClient:
             raise
 
         return [self._parse_page(page) for page in data.get("results", [])]
+
+    # ------------------------------------------------------------------
+    # Shift methods
+    # ------------------------------------------------------------------
+
+    async def create_shift(self, name: str, shift_start: str, entries_json: str) -> Dict[str, Any]:
+        if not self._shifts_database_id:
+            raise RuntimeError("Shifts database not configured")
+
+        url = f"{NOTION_API_BASE}/pages"
+        payload = {
+            "parent": {"database_id": self._shifts_database_id},
+            "properties": {
+                "Name": {"title": [{"text": {"content": name}}]},
+                "shift_start": {"date": {"start": shift_start}},
+                "entries": {"rich_text": [{"text": {"content": entries_json}}]},
+            },
+        }
+
+        async with httpx.AsyncClient(timeout=httpx.Timeout(15.0)) as client:
+            response = await client.post(url, headers=self._headers, json=payload)
+            response.raise_for_status()
+            return response.json()
+
+    async def update_shift_entries(self, page_id: str, entries_json: str) -> None:
+        url = f"{NOTION_API_BASE}/pages/{page_id}"
+        payload = {
+            "properties": {
+                "entries": {"rich_text": [{"text": {"content": entries_json}}]},
+            }
+        }
+
+        async with httpx.AsyncClient(timeout=httpx.Timeout(15.0)) as client:
+            response = await client.patch(url, headers=self._headers, json=payload)
+            response.raise_for_status()
+
+    async def fetch_shifts(self, limit: int = 10) -> List[Dict[str, Any]]:
+        if not self._shifts_database_id:
+            raise RuntimeError("Shifts database not configured")
+
+        url = f"{NOTION_API_BASE}/databases/{self._shifts_database_id}/query"
+        body: Dict[str, Any] = {
+            "sorts": [{"property": "shift_start", "direction": "descending"}],
+            "page_size": limit,
+        }
+
+        async with httpx.AsyncClient(timeout=httpx.Timeout(15.0)) as client:
+            response = await client.post(url, headers=self._headers, json=body)
+            response.raise_for_status()
+            data = response.json()
+
+        return data.get("results", [])
+
+    async def delete_shift(self, page_id: str) -> None:
+        url = f"{NOTION_API_BASE}/pages/{page_id}"
+        payload = {"archived": True}
+
+        async with httpx.AsyncClient(timeout=httpx.Timeout(15.0)) as client:
+            response = await client.patch(url, headers=self._headers, json=payload)
+            response.raise_for_status()
 
     def _parse_page(self, page: Dict[str, Any]) -> Dict[str, Any]:
         properties = page.get("properties", {})

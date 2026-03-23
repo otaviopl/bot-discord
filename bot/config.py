@@ -12,8 +12,10 @@ class Settings:
     webhook_url: str
     julgar_channel_id: int
     webhook_secret: Optional[str] = None
+    target_user_id: Optional[int] = None
     notion_token: Optional[str] = None
     notion_database_id: Optional[str] = None
+    notion_shift_database_id: Optional[str] = None
     # Google Calendar (opcional)
     google_client_id: Optional[str] = None
     google_client_secret: Optional[str] = None
@@ -31,8 +33,11 @@ class Settings:
         webhook_url = _required_env("WEBHOOK_URL")
         julgar_channel_id = _required_int_env("JULGAR_CHANNEL_ID")
         webhook_secret = os.getenv("WEBHOOK_SECRET")
+        target_user_id_raw = os.getenv("TARGET_USER_ID")
+        target_user_id = int(target_user_id_raw) if target_user_id_raw else None
         notion_token = os.getenv("NOTION_TOKEN")
         notion_database_id = os.getenv("NOTION_DATABASE_ID")
+        notion_shift_database_id = os.getenv("NOTION_SHIFT_DATABASE_ID")
 
         google_client_id = os.getenv("GOOGLE_CLIENT_ID") or None
         google_client_secret = os.getenv("GOOGLE_CLIENT_SECRET") or None
@@ -52,8 +57,10 @@ class Settings:
             webhook_url=webhook_url,
             julgar_channel_id=julgar_channel_id,
             webhook_secret=webhook_secret,
+            target_user_id=target_user_id,
             notion_token=notion_token,
             notion_database_id=notion_database_id,
+            notion_shift_database_id=notion_shift_database_id,
             google_client_id=google_client_id,
             google_client_secret=google_client_secret,
             calendar_channel_id=calendar_channel_id,

@@ -22,5 +22,6 @@ __all__ = [
     "VoiceWatcherClient",
     "VoiceListener",
     "WebhookDispatcher",
+    "shift_manager",
 ]
 

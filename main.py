@@ -46,8 +46,12 @@ def main() -> None:
         notion_client = NotionClient(
             token=settings.notion_token,
             database_id=settings.notion_database_id,
+            shifts_database_id=settings.notion_shift_database_id,
         )
-        logger.info("Notion integration enabled")
+        logger.info(
+            "Notion integration enabled",
+            extra={"context": {"shifts_db": bool(settings.notion_shift_database_id)}},
+        )
     else:
         logger.warning(
             "Notion integration disabled (NOTION_TOKEN or NOTION_DATABASE_ID not set)"
@@ -84,6 +88,8 @@ def main() -> None:
         notion_client=notion_client,
         timer_manager=timer_manager,
         calendar_listener=calendar_listener,
+        target_user_id=settings.target_user_id,
+        tz_name=settings.calendar_timezone,
     )
     client.run(settings.discord_bot_token, log_handler=None)
 

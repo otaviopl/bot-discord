@@ -1,5 +1,6 @@
 import logging
-from typing import List
+from datetime import datetime, timezone
+from typing import List, Optional
 
 import discord
 
@@ -10,49 +11,8 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# /create-task flow
+# !create-task flow
 # ---------------------------------------------------------------------------
-
-class CreateTaskModal(discord.ui.Modal, title="Nova Tarefa"):
-    task_name = discord.ui.TextInput(
-        label="Nome da tarefa",
-        placeholder="Ex: Implementar API de pagamentos",
-        required=True,
-        max_length=200,
-    )
-    task_description = discord.ui.TextInput(
-        label="Descrição (opcional)",
-        style=discord.TextStyle.paragraph,
-        placeholder="Detalhes sobre a tarefa...",
-        required=False,
-        max_length=2000,
-    )
-
-    def __init__(
-        self,
-        notion_client: NotionClient,
-        timer_manager: TimerManager,
-        status_options: List[str],
-    ) -> None:
-        super().__init__()
-        self._notion = notion_client
-        self._timer = timer_manager
-        self._status_options = status_options
-
-    async def on_submit(self, interaction: discord.Interaction) -> None:
-        view = StatusSelectView(
-            notion_client=self._notion,
-            timer_manager=self._timer,
-            task_name=self.task_name.value,
-            task_description=self.task_description.value or None,
-            status_options=self._status_options,
-        )
-        await interaction.response.send_message(
-            f"**Tarefa:** {self.task_name.value}\nEscolha o status inicial:",
-            view=view,
-            ephemeral=True,
-        )
-
 
 class StatusSelectView(discord.ui.View):
     def __init__(
@@ -60,7 +20,7 @@ class StatusSelectView(discord.ui.View):
         notion_client: NotionClient,
         timer_manager: TimerManager,
         task_name: str,
-        task_description: str | None,
+        task_description: Optional[str],
         status_options: List[str],
     ) -> None:
         super().__init__(timeout=120)
@@ -80,7 +40,7 @@ class StatusSelectView(discord.ui.View):
 
     async def _on_select(self, interaction: discord.Interaction) -> None:
         status = interaction.data["values"][0]  # type: ignore[index]
-        await interaction.response.defer(ephemeral=True)
+        await interaction.response.defer()
 
         try:
             task = await self._notion.create_task(
@@ -90,10 +50,24 @@ class StatusSelectView(discord.ui.View):
             )
         except Exception as exc:
             logger.error("Failed to create Notion task", extra={"context": {"error": str(exc)}})
-            await interaction.followup.send(
-                f"Erro ao criar tarefa no Notion: `{exc}`", ephemeral=True
+            embed = discord.Embed(
+                title="❌ Erro ao criar tarefa",
+                description=f"```{exc}```",
+                color=discord.Color.red(),
             )
+            await interaction.followup.send(embed=embed)
             return
+
+        embed = discord.Embed(
+            title="✅ Tarefa criada",
+            color=discord.Color.green(),
+            timestamp=datetime.now(timezone.utc),
+        )
+        embed.add_field(name="Nome", value=f"[{task['name']}]({task['url']})", inline=False)
+        embed.add_field(name="Status", value=f"`{status}`", inline=True)
+        if self._task_description:
+            embed.add_field(name="Descrição", value=self._task_description[:200], inline=False)
+        embed.set_footer(text="Notion")
 
         view = StartTimerView(
             timer_manager=self._timer,
@@ -102,9 +76,9 @@ class StatusSelectView(discord.ui.View):
             task_url=task["url"],
         )
         await interaction.followup.send(
-            f"✅ Tarefa **[{task['name']}]({task['url']})** criada com status `{status}`!\n\nDeseja iniciar o cronômetro?",
+            content="Deseja iniciar o cronômetro?",
+            embed=embed,
             view=view,
-            ephemeral=True,
         )
         self.stop()
 
@@ -123,7 +97,7 @@ class StartTimerView(discord.ui.View):
         self._task_name = task_name
         self._task_url = task_url
 
-    @discord.ui.button(label="Sim, iniciar timer", style=discord.ButtonStyle.success)
+    @discord.ui.button(label="Sim, iniciar timer", style=discord.ButtonStyle.success, emoji="⏱️")
     async def start_yes(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         entry = self._timer.start(
             user_id=interaction.user.id,
@@ -131,20 +105,27 @@ class StartTimerView(discord.ui.View):
             task_name=self._task_name,
             task_url=self._task_url,
         )
-        await interaction.response.send_message(
-            f"⏱️ Cronômetro iniciado para **{entry.task_name}**!",
-            ephemeral=True,
+        embed = discord.Embed(
+            title="⏱️ Cronômetro iniciado",
+            description=f"Tarefa: **{entry.task_name}**\nUse `!stop-timer` para parar.",
+            color=discord.Color.green(),
+            timestamp=datetime.now(timezone.utc),
         )
+        await interaction.response.send_message(embed=embed)
         self.stop()
 
     @discord.ui.button(label="Não", style=discord.ButtonStyle.secondary)
     async def start_no(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
-        await interaction.response.send_message("Ok, tarefa criada sem cronômetro.", ephemeral=True)
+        embed = discord.Embed(
+            description="Ok, tarefa criada sem cronômetro.",
+            color=discord.Color.light_grey(),
+        )
+        await interaction.response.send_message(embed=embed)
         self.stop()
 
 
 # ---------------------------------------------------------------------------
-# /stop-timer flow
+# !stop-timer flow
 # ---------------------------------------------------------------------------
 
 class StopTimerSelectView(discord.ui.View):
@@ -166,9 +147,9 @@ class StopTimerSelectView(discord.ui.View):
             placeholder="Selecione o timer para parar...",
             options=[
                 discord.SelectOption(
-                    label=f"{t.task_name} ({t.elapsed_display})",
+                    label=t.task_name,
                     value=t.task_id,
-                    description=f"Rodando há {t.elapsed_display}",
+                    description=f"⏱️ Rodando há {t.elapsed_display}",
                 )
                 for t in active[:25]
             ],
@@ -180,11 +161,24 @@ class StopTimerSelectView(discord.ui.View):
         task_id = interaction.data["values"][0]  # type: ignore[index]
         entry = self._timer.stop(self._user_id, task_id)
         if not entry:
-            await interaction.response.send_message("Timer não encontrado.", ephemeral=True)
+            embed = discord.Embed(
+                title="❌ Timer não encontrado",
+                color=discord.Color.red(),
+            )
+            await interaction.response.send_message(embed=embed)
             self.stop()
             return
 
         elapsed = entry.elapsed_minutes
+
+        embed = discord.Embed(
+            title="⏹️ Timer parado",
+            color=discord.Color.orange(),
+            timestamp=datetime.now(timezone.utc),
+        )
+        embed.add_field(name="Tarefa", value=f"**{entry.task_name}**", inline=False)
+        embed.add_field(name="Tempo da sessão", value=f"`{entry.elapsed_display}` ({elapsed} min)", inline=True)
+        embed.set_footer(text="Escolha o novo status abaixo")
 
         view = StopTimerStatusView(
             notion_client=self._notion,
@@ -194,13 +188,7 @@ class StopTimerSelectView(discord.ui.View):
             task_url=entry.task_url,
             elapsed_minutes=elapsed,
         )
-        await interaction.response.send_message(
-            f"⏹️ Timer parado para **{entry.task_name}**\n"
-            f"Tempo registrado: **{entry.elapsed_display}** ({elapsed} min)\n\n"
-            f"Qual status deseja atribuir à tarefa?",
-            view=view,
-            ephemeral=True,
-        )
+        await interaction.response.send_message(embed=embed, view=view)
         self.stop()
 
 
@@ -232,26 +220,35 @@ class StopTimerStatusView(discord.ui.View):
 
     async def _on_select(self, interaction: discord.Interaction) -> None:
         new_status = interaction.data["values"][0]  # type: ignore[index]
-        await interaction.response.defer(ephemeral=True)
+        await interaction.response.defer()
 
         try:
-            await self._notion.update_task(
+            total_time = await self._notion.update_task(
                 page_id=self._task_id,
                 time_min=self._elapsed_minutes,
                 status=new_status,
             )
         except Exception as exc:
             logger.error("Failed to update Notion task", extra={"context": {"error": str(exc)}})
-            await interaction.followup.send(
-                f"Erro ao atualizar tarefa no Notion: `{exc}`", ephemeral=True
+            embed = discord.Embed(
+                title="❌ Erro ao atualizar tarefa",
+                description=f"```{exc}```",
+                color=discord.Color.red(),
             )
+            await interaction.followup.send(embed=embed)
             return
 
-        await interaction.followup.send(
-            f"✅ **{self._task_name}** atualizada!\n"
-            f"⏱️ Tempo: **{self._elapsed_minutes} min**\n"
-            f"📋 Status: **{new_status}**\n"
-            f"🔗 [Abrir no Notion]({self._task_url})",
-            ephemeral=True,
+        embed = discord.Embed(
+            title="✅ Tarefa atualizada",
+            color=discord.Color.green(),
+            timestamp=datetime.now(timezone.utc),
         )
+        embed.add_field(name="Tarefa", value=f"[{self._task_name}]({self._task_url})", inline=False)
+        embed.add_field(name="Sessão", value=f"`{self._elapsed_minutes} min`", inline=True)
+        if total_time > self._elapsed_minutes:
+            embed.add_field(name="Total acumulado", value=f"`{total_time} min`", inline=True)
+        embed.add_field(name="Status", value=f"`{new_status}`", inline=True)
+        embed.set_footer(text="Notion")
+
+        await interaction.followup.send(embed=embed)
         self.stop()
