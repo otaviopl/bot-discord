@@ -23,6 +23,7 @@ class NotionClient:
             "Notion-Version": NOTION_VERSION,
             "Content-Type": "application/json",
         }
+        self._category_prop_name: Optional[str] = None
 
     async def fetch_status_options(self) -> List[str]:
         url = f"{NOTION_API_BASE}/databases/{self._database_id}"
@@ -52,6 +53,7 @@ class NotionClient:
         name: str,
         status: str,
         description: Optional[str] = None,
+        categories: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
         url = f"{NOTION_API_BASE}/pages"
 
@@ -63,6 +65,12 @@ class NotionClient:
             properties["description"] = {
                 "rich_text": [{"text": {"content": description}}]
             }
+        if categories:
+            category_prop = await self._get_category_property_name()
+            if category_prop:
+                properties[category_prop] = {
+                    "multi_select": [{"name": category} for category in categories]
+                }
 
         payload = {
             "parent": {"database_id": self._database_id},
@@ -108,6 +116,7 @@ class NotionClient:
         page_id: str,
         time_min: Optional[int] = None,
         status: Optional[str] = None,
+        categories: Optional[List[str]] = None,
     ) -> int:
         """Returns the new total time_min after summing."""
         url = f"{NOTION_API_BASE}/pages/{page_id}"
@@ -122,6 +131,12 @@ class NotionClient:
 
         if status is not None:
             properties["status"] = {"status": {"name": status}}
+        if categories is not None:
+            category_prop = await self._get_category_property_name()
+            if category_prop:
+                properties[category_prop] = {
+                    "multi_select": [{"name": category} for category in categories]
+                }
 
         if not properties:
             return total_time
@@ -174,6 +189,61 @@ class NotionClient:
             raise
 
         return [self._parse_page(page) for page in data.get("results", [])]
+
+    async def fetch_category_options(self) -> List[str]:
+        url = f"{NOTION_API_BASE}/databases/{self._database_id}"
+
+        async with httpx.AsyncClient(timeout=httpx.Timeout(15.0)) as client:
+            response = await client.get(url, headers=self._headers)
+            response.raise_for_status()
+            data = response.json()
+
+        properties = data.get("properties", {})
+        property_name = self._find_category_property_name(properties)
+        if not property_name:
+            return []
+
+        self._category_prop_name = property_name
+        prop = properties.get(property_name, {})
+        ptype = prop.get("type")
+
+        if ptype == "multi_select":
+            options = prop.get("multi_select", {}).get("options", [])
+        elif ptype == "select":
+            options = prop.get("select", {}).get("options", [])
+        else:
+            options = []
+
+        return [opt["name"] for opt in options if "name" in opt]
+
+    async def update_task_categories(
+        self,
+        page_id: str,
+        *,
+        add: Optional[List[str]] = None,
+        remove: Optional[List[str]] = None,
+        replace: Optional[List[str]] = None,
+    ) -> List[str]:
+        current_categories = await self.fetch_task_categories(page_id)
+        if replace is not None:
+            next_categories = list(dict.fromkeys(replace))
+        else:
+            next_categories = list(current_categories)
+            if add:
+                existing = {category.casefold() for category in next_categories}
+                for category in add:
+                    if category.casefold() not in existing:
+                        next_categories.append(category)
+                        existing.add(category.casefold())
+            if remove:
+                remove_set = {category.casefold() for category in remove}
+                next_categories = [
+                    category for category in next_categories
+                    if category.casefold() not in remove_set
+                ]
+
+        await self.update_task(page_id=page_id, categories=next_categories)
+        return next_categories
 
     # ------------------------------------------------------------------
     # Shift methods
@@ -238,6 +308,7 @@ class NotionClient:
     def _parse_page(self, page: Dict[str, Any]) -> Dict[str, Any]:
         properties = page.get("properties", {})
         name = self._extract_title(properties)
+        categories = self._extract_categories(properties)
 
         return {
             "id": page.get("id", ""),
@@ -246,8 +317,21 @@ class NotionClient:
             "property_due": self._extract_date(properties),
             "property_description": self._extract_rich_text(properties, "Description"),
             "property_status": self._extract_status(properties),
+            "property_categories": categories,
+            "is_freela": self._is_freela_task(categories),
             "property_name": name,
         }
+
+    async def fetch_task_categories(self, page_id: str) -> List[str]:
+        url = f"{NOTION_API_BASE}/pages/{page_id}"
+
+        async with httpx.AsyncClient(timeout=httpx.Timeout(15.0)) as client:
+            response = await client.get(url, headers=self._headers)
+            response.raise_for_status()
+            page = response.json()
+
+        properties = page.get("properties", {})
+        return self._extract_categories(properties)
 
     def _extract_title(self, properties: Dict[str, Any]) -> str:
         for prop in properties.values():
@@ -291,3 +375,51 @@ class NotionClient:
                     p.get("plain_text", "") for p in prop.get("rich_text", [])
                 )
         return ""
+
+    async def _get_category_property_name(self) -> Optional[str]:
+        if self._category_prop_name:
+            return self._category_prop_name
+
+        url = f"{NOTION_API_BASE}/databases/{self._database_id}"
+        async with httpx.AsyncClient(timeout=httpx.Timeout(15.0)) as client:
+            response = await client.get(url, headers=self._headers)
+            response.raise_for_status()
+            data = response.json()
+
+        properties = data.get("properties", {})
+        self._category_prop_name = self._find_category_property_name(properties)
+        return self._category_prop_name
+
+    def _find_category_property_name(self, properties: Dict[str, Any]) -> Optional[str]:
+        preferred_keys = ("categories", "category", "categorias", "categoria")
+        for key, prop in properties.items():
+            normalized_key = key.strip().lower()
+            if normalized_key not in preferred_keys:
+                continue
+            if prop.get("type") in ("multi_select", "select"):
+                return key
+
+        for key, prop in properties.items():
+            if prop.get("type") in ("multi_select", "select"):
+                return key
+        return None
+
+    def _extract_categories(self, properties: Dict[str, Any]) -> List[str]:
+        property_name = self._find_category_property_name(properties)
+        if not property_name:
+            return []
+
+        prop = properties.get(property_name, {})
+        ptype = prop.get("type")
+        if ptype == "multi_select":
+            values = prop.get("multi_select", [])
+            return [value.get("name", "") for value in values if value.get("name")]
+        if ptype == "select":
+            value = prop.get("select")
+            if value and value.get("name"):
+                return [value["name"]]
+        return []
+
+    def _is_freela_task(self, categories: List[str]) -> bool:
+        normalized = [category.lower() for category in categories]
+        return any("freela" in category for category in normalized)
