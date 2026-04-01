@@ -21,6 +21,7 @@ class StatusSelectView(discord.ui.View):
         timer_manager: TimerManager,
         task_name: str,
         task_description: Optional[str],
+        task_categories: Optional[List[str]],
         status_options: List[str],
     ) -> None:
         super().__init__(timeout=120)
@@ -28,6 +29,7 @@ class StatusSelectView(discord.ui.View):
         self._timer = timer_manager
         self._task_name = task_name
         self._task_description = task_description
+        self._task_categories = task_categories or []
 
         select = discord.ui.Select(
             placeholder="Selecione o status...",
@@ -47,6 +49,7 @@ class StatusSelectView(discord.ui.View):
                 name=self._task_name,
                 status=status,
                 description=self._task_description,
+                categories=self._task_categories,
             )
         except Exception as exc:
             logger.error("Failed to create Notion task", extra={"context": {"error": str(exc)}})
@@ -65,6 +68,12 @@ class StatusSelectView(discord.ui.View):
         )
         embed.add_field(name="Nome", value=f"[{task['name']}]({task['url']})", inline=False)
         embed.add_field(name="Status", value=f"`{status}`", inline=True)
+        if self._task_categories:
+            embed.add_field(
+                name="Categorias",
+                value=", ".join(f"`{category}`" for category in self._task_categories),
+                inline=False,
+            )
         if self._task_description:
             embed.add_field(name="Descrição", value=self._task_description[:200], inline=False)
         embed.set_footer(text="Notion")

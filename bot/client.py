@@ -42,7 +42,9 @@ def _build_help_embed() -> discord.Embed:
         name="📋 Tarefas",
         value=(
             "`!tasks` — Lista suas tarefas do Notion\n"
+            "`!tasks-freela` — Lista tarefas da categoria freela\n"
             "`!create-task` — Cria uma nova tarefa\n"
+            "`!edit-task` — Edita categorias de uma tarefa\n"
         ),
         inline=False,
     )
@@ -201,9 +203,15 @@ class VoiceWatcherClient(discord.Client):
         elif cmd == "!tasks":
             await self._notify_dm_log(message, "!tasks")
             await self._handle_tasks_dm(message)
+        elif cmd == "!tasks-freela":
+            await self._notify_dm_log(message, "!tasks-freela")
+            await self._handle_tasks_freela_dm(message)
         elif cmd == "!create-task":
             await self._notify_dm_log(message, "!create-task")
             await self._handle_create_task_dm(message)
+        elif cmd == "!edit-task":
+            await self._notify_dm_log(message, "!edit-task")
+            await self._handle_edit_task_dm(message)
         elif cmd == "!start-timer":
             await self._notify_dm_log(message, "!start-timer")
             await self._handle_start_timer_dm(message)
@@ -247,6 +255,27 @@ class VoiceWatcherClient(discord.Client):
             return
 
         embeds = self._build_task_embeds(tasks)
+        for i in range(0, len(embeds), 10):
+            await message.channel.send(embeds=embeds[i : i + 10])
+
+    async def _handle_tasks_freela_dm(self, message: discord.Message) -> None:
+        if not self._notion_client:
+            await message.channel.send(embed=_embed_error("❌ Notion não configurado", "Defina `NOTION_TOKEN` e `NOTION_DATABASE_ID`."))
+            return
+
+        try:
+            tasks = await self._notion_client.fetch_tasks()
+        except Exception as exc:
+            self._logger.error("Failed to fetch freela tasks", extra={"context": {"error": str(exc)}})
+            await message.channel.send(embed=_embed_error("❌ Erro ao buscar tarefas", f"```{exc}```"))
+            return
+
+        freela_tasks = [task for task in tasks if task.get("is_freela")]
+        if not freela_tasks:
+            await message.channel.send(embed=_embed_info("Nenhuma tarefa com categoria `freela` foi encontrada."))
+            return
+
+        embeds = self._build_task_embeds(freela_tasks, title_prefix="💼 Tarefas Freela")
         for i in range(0, len(embeds), 10):
             await message.channel.send(embeds=embeds[i : i + 10])
 
@@ -299,6 +328,7 @@ class VoiceWatcherClient(discord.Client):
 
         desc_content = desc_msg.content.strip()
         task_description = None if desc_content.lower() in ("não", "nao", "no", "n") else desc_content
+        task_categories = await self._collect_categories(channel, check)
 
         status_options = await self._get_status_options()
         view = StatusSelectView(
@@ -306,6 +336,7 @@ class VoiceWatcherClient(discord.Client):
             timer_manager=self._timer_manager,
             task_name=task_name,
             task_description=task_description,
+            task_categories=task_categories,
             status_options=status_options,
         )
 
@@ -315,6 +346,158 @@ class VoiceWatcherClient(discord.Client):
             color=discord.Color.blurple(),
         )
         await channel.send(embed=status_embed, view=view)
+
+    async def _collect_categories(self, channel: discord.DMChannel, check) -> list[str]:
+        options = []
+        try:
+            options = await self._notion_client.fetch_category_options() if self._notion_client else []
+        except Exception as exc:
+            self._logger.warning("Failed to fetch category options", extra={"context": {"error": str(exc)}})
+
+        if not options:
+            return []
+
+        lines = [f"`{idx}` — {name}" for idx, name in enumerate(options, start=1)]
+        prompt = discord.Embed(
+            description=(
+                "Selecione categorias para a task (uma ou mais).\n"
+                "Responda com números separados por vírgula (ex.: `1,3`) ou `pular`.\n\n"
+                + "\n".join(lines[:25])
+            ),
+            color=discord.Color.blurple(),
+        )
+        await channel.send(embed=prompt)
+
+        try:
+            answer = await self.wait_for("message", check=check, timeout=120)
+        except asyncio.TimeoutError:
+            await channel.send(embed=_embed_warning("⏰ Tempo esgotado para escolher categorias. Continuando sem categorias."))
+            return []
+
+        content = answer.content.strip().lower()
+        if content in ("pular", "skip", "não", "nao", "n"):
+            return []
+
+        selected = []
+        for raw in answer.content.split(","):
+            token = raw.strip()
+            if not token.isdigit():
+                continue
+            idx = int(token)
+            if 1 <= idx <= len(options):
+                selected.append(options[idx - 1])
+
+        deduped: list[str] = []
+        seen = set()
+        for category in selected:
+            key = category.casefold()
+            if key in seen:
+                continue
+            deduped.append(category)
+            seen.add(key)
+        return deduped
+
+    async def _handle_edit_task_dm(self, message: discord.Message) -> None:
+        if not self._notion_client:
+            await message.channel.send(embed=_embed_error("❌ Notion não configurado", "Defina `NOTION_TOKEN` e `NOTION_DATABASE_ID`."))
+            return
+
+        try:
+            tasks = await self._notion_client.fetch_tasks()
+            category_options = await self._notion_client.fetch_category_options()
+        except Exception as exc:
+            await message.channel.send(embed=_embed_error("❌ Erro ao carregar tarefas/categorias", f"```{exc}```"))
+            return
+
+        if not tasks:
+            await message.channel.send(embed=_embed_info("Nenhuma tarefa encontrada para editar."))
+            return
+        if not category_options:
+            await message.channel.send(embed=_embed_warning("Não foi possível identificar categorias configuradas no Notion."))
+            return
+
+        channel = message.channel
+        author = message.author
+
+        def check(m: discord.Message) -> bool:
+            return m.author.id == author.id and m.channel.id == channel.id
+
+        task_lines = [f"`{i}` — {task['name']}" for i, task in enumerate(tasks[:25], start=1)]
+        await channel.send(embed=_embed_info("Escolha a tarefa para editar:\n" + "\n".join(task_lines)))
+        try:
+            task_answer = await self.wait_for("message", check=check, timeout=120)
+        except asyncio.TimeoutError:
+            await channel.send(embed=_embed_warning("⏰ Tempo esgotado."))
+            return
+
+        if not task_answer.content.strip().isdigit():
+            await channel.send(embed=_embed_warning("Entrada inválida. Use `!edit-task` novamente."))
+            return
+
+        task_index = int(task_answer.content.strip())
+        if not (1 <= task_index <= min(len(tasks), 25)):
+            await channel.send(embed=_embed_warning("Índice da tarefa inválido."))
+            return
+        task = tasks[task_index - 1]
+
+        current_categories = task.get("property_categories", [])
+        category_lines = [f"`{i}` — {name}" for i, name in enumerate(category_options, start=1)]
+        instructions = (
+            "Como deseja editar as categorias?\n"
+            "`add 1,2` para adicionar\n"
+            "`remove 2` para remover\n"
+            "`set 1,3` para substituir tudo\n\n"
+            f"Categorias atuais: {', '.join(current_categories) if current_categories else 'nenhuma'}\n\n"
+            + "\n".join(category_lines[:25])
+        )
+        await channel.send(embed=_embed_info(instructions))
+
+        try:
+            op_answer = await self.wait_for("message", check=check, timeout=120)
+        except asyncio.TimeoutError:
+            await channel.send(embed=_embed_warning("⏰ Tempo esgotado."))
+            return
+
+        parts = op_answer.content.strip().split(maxsplit=1)
+        if len(parts) != 2:
+            await channel.send(embed=_embed_warning("Formato inválido. Ex.: `add 1,2`"))
+            return
+
+        operation = parts[0].lower()
+        indexes = [p.strip() for p in parts[1].split(",")]
+        selected_categories = []
+        for idx_text in indexes:
+            if not idx_text.isdigit():
+                continue
+            idx = int(idx_text)
+            if 1 <= idx <= len(category_options):
+                selected_categories.append(category_options[idx - 1])
+
+        if not selected_categories:
+            await channel.send(embed=_embed_warning("Nenhuma categoria válida selecionada."))
+            return
+
+        try:
+            if operation == "add":
+                updated = await self._notion_client.update_task_categories(task["id"], add=selected_categories)
+            elif operation in ("remove", "rm"):
+                updated = await self._notion_client.update_task_categories(task["id"], remove=selected_categories)
+            elif operation == "set":
+                updated = await self._notion_client.update_task_categories(task["id"], replace=selected_categories)
+            else:
+                await channel.send(embed=_embed_warning("Operação inválida. Use `add`, `remove` ou `set`."))
+                return
+        except Exception as exc:
+            await channel.send(embed=_embed_error("❌ Erro ao atualizar categorias", f"```{exc}```"))
+            return
+
+        is_freela = any("freela" in category.lower() for category in updated)
+        flow_msg = "Entrou no fluxo **freela**." if is_freela else "Fluxo padrão mantido."
+        result_embed = _embed_success(
+            "✅ Task atualizada",
+            f"Tarefa: **{task['name']}**\nCategorias: {', '.join(updated) if updated else 'nenhuma'}\n{flow_msg}",
+        )
+        await channel.send(embed=result_embed)
 
     # ------------------------------------------------------------------
     # !start-timer (existing tasks)
@@ -689,7 +872,7 @@ class VoiceWatcherClient(discord.Client):
     # Embeds
     # ------------------------------------------------------------------
 
-    def _build_task_embeds(self, tasks: list) -> list:
+    def _build_task_embeds(self, tasks: list, title_prefix: str = "📋 Tarefas Notion") -> list:
         chunk_size = 10
         embeds = []
 
@@ -707,12 +890,17 @@ class VoiceWatcherClient(discord.Client):
                 if task["property_description"]:
                     desc = task["property_description"][:100]
                     line += f"\n    {desc}"
+                categories = task.get("property_categories") or []
+                if categories:
+                    line += "\n    Categorias: " + ", ".join(f"`{category}`" for category in categories)
+                if task.get("is_freela"):
+                    line += "\n    💼 Fluxo freela"
                 lines.append(line)
 
             total = len(tasks)
             page = (i // chunk_size) + 1
             total_pages = (total + chunk_size - 1) // chunk_size
-            title = f"📋 Tarefas Notion ({total})"
+            title = f"{title_prefix} ({total})"
             if total_pages > 1:
                 title += f" — página {page}/{total_pages}"
 
