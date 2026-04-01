@@ -41,10 +41,12 @@ def _build_help_embed() -> discord.Embed:
     embed.add_field(
         name="📋 Tarefas",
         value=(
-            "`!tasks` — Lista suas tarefas do Notion\n"
-            "`!tasks-freela` — Lista tarefas da categoria freela\n"
-            "`!create-task` — Cria uma nova tarefa\n"
-            "`!edit-task` — Edita categorias de uma tarefa\n"
+            "`!tasks` — Lista todas as suas tarefas do Notion com status, prazo e categorias\n"
+            "`!tasks-freela` — Filtra e exibe apenas tarefas marcadas com a categoria **freela**\n"
+            "`!create-task` — Cria uma nova tarefa via fluxo conversacional "
+            "(nome, descrição, categorias do Notion e status)\n"
+            "`!edit-task` — Edita as categorias de uma tarefa existente "
+            "(adicionar, remover ou substituir categorias do Notion)\n"
         ),
         inline=False,
     )
@@ -52,7 +54,7 @@ def _build_help_embed() -> discord.Embed:
         name="⏱️ Cronômetro",
         value=(
             "`!start-timer` — Inicia cronômetro para uma tarefa existente\n"
-            "`!stop-timer` — Para um cronômetro ativo"
+            "`!stop-timer` — Para um cronômetro ativo e registra o tempo no Notion"
         ),
         inline=False,
     )
@@ -60,8 +62,8 @@ def _build_help_embed() -> discord.Embed:
         name="🕐 Turnos",
         value=(
             "`!shift` — Registra entrada/saída (alterna automático)\n"
-            "`!shifts` — Lista turnos recentes com resumo\n"
-            "`!shift-edit` — Editar último turno"
+            "`!shifts` — Lista turnos recentes com resumo de horas e pausas\n"
+            "`!shift-edit` — Editar entradas do último turno"
         ),
         inline=False,
     )
@@ -73,7 +75,17 @@ def _build_help_embed() -> discord.Embed:
         ),
         inline=False,
     )
-    embed.set_footer(text="Envie qualquer comando para começar")
+    embed.add_field(
+        name="💼 Fluxo Freela",
+        value=(
+            "Tarefas com a categoria **freela** são automaticamente identificadas.\n"
+            "Use `!tasks-freela` para ver só essas tarefas, ou `!edit-task` "
+            "para marcar/desmarcar uma tarefa como freela.\n"
+            "As categorias disponíveis são carregadas direto do schema do Notion."
+        ),
+        inline=False,
+    )
+    embed.set_footer(text="Envie qualquer comando no DM para começar")
     return embed
 
 
@@ -180,6 +192,10 @@ class VoiceWatcherClient(discord.Client):
 
     async def on_message(self, message: discord.Message) -> None:
         if message.author.bot:
+            return
+
+        if message.content.strip().lower() == "!help":
+            await message.channel.send(embed=_build_help_embed())
             return
 
         if isinstance(message.channel, discord.DMChannel):
