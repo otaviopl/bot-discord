@@ -8,7 +8,7 @@ from dotenv import load_dotenv
 @dataclass(frozen=True)
 class Settings:
     discord_bot_token: str
-    voice_channel_id: int
+    voice_channel_ids: tuple[int, ...]
     webhook_url: str
     julgar_channel_id: int
     webhook_secret: Optional[str] = None
@@ -29,7 +29,7 @@ class Settings:
         load_dotenv()
 
         token = _required_env("DISCORD_BOT_TOKEN")
-        voice_channel_id = _required_int_env("VOICE_CHANNEL_ID")
+        voice_channel_ids = _required_int_list_env("VOICE_CHANNEL_IDS", fallback_key="VOICE_CHANNEL_ID")
         webhook_url = _required_env("WEBHOOK_URL")
         julgar_channel_id = _required_int_env("JULGAR_CHANNEL_ID")
         webhook_secret = os.getenv("WEBHOOK_SECRET")
@@ -53,7 +53,7 @@ class Settings:
 
         return cls(
             discord_bot_token=token,
-            voice_channel_id=voice_channel_id,
+            voice_channel_ids=voice_channel_ids,
             webhook_url=webhook_url,
             julgar_channel_id=julgar_channel_id,
             webhook_secret=webhook_secret,
@@ -83,3 +83,15 @@ def _required_int_env(key: str) -> int:
         return int(raw_value)
     except ValueError as exc:
         raise ValueError(f"Environment variable {key} must be a valid integer") from exc
+
+
+def _required_int_list_env(key: str, fallback_key: str | None = None) -> tuple[int, ...]:
+    raw = os.getenv(key)
+    if not raw and fallback_key:
+        raw = os.getenv(fallback_key)
+    if not raw or not raw.strip():
+        raise ValueError(f"Missing required environment variable: {key}")
+    try:
+        return tuple(int(v.strip()) for v in raw.split(",") if v.strip())
+    except ValueError as exc:
+        raise ValueError(f"Environment variable {key} must be comma-separated integers") from exc

@@ -8,14 +8,14 @@ from .webhook import WebhookDispatcher
 
 
 class VoiceListener:
-    def __init__(self, voice_channel_id: int, webhook: WebhookDispatcher) -> None:
+    def __init__(self, voice_channel_ids: tuple[int, ...], webhook: WebhookDispatcher) -> None:
         self._logger = logging.getLogger(__name__)
-        self._voice_channel_id = voice_channel_id
+        self._voice_channel_ids: set[int] = set(voice_channel_ids)
         self._webhook = webhook
 
     @property
-    def voice_channel_id(self) -> int:
-        return self._voice_channel_id
+    def voice_channel_ids(self) -> set[int]:
+        return self._voice_channel_ids
 
     async def handle_voice_state_update(
         self,
@@ -27,8 +27,8 @@ class VoiceListener:
         new_channel_id = after.channel.id if after.channel else None
 
         entered_target_channel = (
-            old_channel_id != self._voice_channel_id
-            and new_channel_id == self._voice_channel_id
+            new_channel_id in self._voice_channel_ids
+            and old_channel_id not in self._voice_channel_ids
         )
 
         if not entered_target_channel:

@@ -190,35 +190,40 @@ class VoiceWatcherClient(discord.Client):
         )
         await self._voice_listener.handle_voice_state_update(member, before, after)
 
+    _BOT_COMMANDS = frozenset({
+        "!help", "!tasks", "!tasks-pending", "!tasks-freela", "!create-task",
+        "!edit-task", "!start-timer", "!stop-timer", "!shift", "!shifts",
+        "!shift-edit", "!servers", "!logs on", "!logs off",
+    })
+
     async def on_message(self, message: discord.Message) -> None:
         if message.author.bot:
             return
 
-        if message.content.strip().lower() == "!help":
-            await message.channel.send(embed=_build_help_embed())
+        cmd = message.content.strip().lower()
+
+        if cmd in self._BOT_COMMANDS:
+            await self._handle_command(message, cmd)
             return
 
-        if isinstance(message.channel, discord.DMChannel):
-            await self._handle_dm_command(message)
-            return
-
-        await self._julgar_listener.handle_message(self, message)
-        if self._calendar_listener is not None:
-            await self._calendar_listener.handle_message(self, message)
+        if not isinstance(message.channel, discord.DMChannel):
+            await self._julgar_listener.handle_message(self, message)
+            if self._calendar_listener is not None:
+                await self._calendar_listener.handle_message(self, message)
 
     # ------------------------------------------------------------------
-    # DM command router
+    # Command router (works in DMs and server channels)
     # ------------------------------------------------------------------
 
-    async def _handle_dm_command(self, message: discord.Message) -> None:
-        content = message.content.strip()
-        cmd = content.lower()
-
+    async def _handle_command(self, message: discord.Message, cmd: str) -> None:
         if cmd == "!help":
             await message.channel.send(embed=_build_help_embed())
         elif cmd == "!tasks":
             await self._notify_dm_log(message, "!tasks")
             await self._handle_tasks_dm(message)
+        elif cmd == "!tasks-pending":
+            await self._notify_dm_log(message, "!tasks-pending")
+            await self._handle_tasks_pending_dm(message)
         elif cmd == "!tasks-freela":
             await self._notify_dm_log(message, "!tasks-freela")
             await self._handle_tasks_freela_dm(message)
@@ -243,12 +248,60 @@ class VoiceWatcherClient(discord.Client):
         elif cmd == "!shift-edit":
             await self._notify_dm_log(message, "!shift-edit")
             await self._handle_shift_edit(message)
+        elif cmd == "!servers":
+            await self._notify_dm_log(message, "!servers")
+            await self._handle_servers_dm(message)
         elif cmd == "!logs on":
             self._dm_log_subscribers.add(message.author.id)
             await message.channel.send(embed=_embed_success("✅ Logs ativados", "Você receberá notificações de comandos no DM."))
         elif cmd == "!logs off":
             self._dm_log_subscribers.discard(message.author.id)
             await message.channel.send(embed=_embed_info("Logs desativados."))
+
+    # ------------------------------------------------------------------
+    # !servers
+    # ------------------------------------------------------------------
+
+    async def _handle_servers_dm(self, message: discord.Message) -> None:
+        if not self.guilds:
+            await message.channel.send(embed=_embed_info("O bot não está em nenhum servidor."))
+            return
+
+        monitored_ids = self._voice_listener.voice_channel_ids
+
+        embeds: list[discord.Embed] = []
+        for guild in self.guilds:
+            embed = discord.Embed(
+                title=f"🏠 {guild.name}",
+                description=f"ID: `{guild.id}` · Membros: `{guild.member_count}`",
+                color=discord.Color.blurple(),
+            )
+
+            voice_lines: list[str] = []
+            for ch in sorted(guild.voice_channels, key=lambda c: c.position):
+                marker = " ✅" if ch.id in monitored_ids else ""
+                voice_lines.append(f"`{ch.id}` — {ch.name}{marker}")
+            if voice_lines:
+                embed.add_field(
+                    name=f"🔊 Canais de voz ({len(voice_lines)})",
+                    value="\n".join(voice_lines[:20]),
+                    inline=False,
+                )
+
+            text_lines: list[str] = []
+            for ch in sorted(guild.text_channels, key=lambda c: c.position):
+                text_lines.append(f"`{ch.id}` — #{ch.name}")
+            if text_lines:
+                embed.add_field(
+                    name=f"💬 Canais de texto ({len(text_lines)})",
+                    value="\n".join(text_lines[:20]),
+                    inline=False,
+                )
+
+            embeds.append(embed)
+
+        for i in range(0, len(embeds), 10):
+            await message.channel.send(embeds=embeds[i : i + 10])
 
     # ------------------------------------------------------------------
     # !tasks
@@ -271,6 +324,27 @@ class VoiceWatcherClient(discord.Client):
             return
 
         embeds = self._build_task_embeds(tasks)
+        for i in range(0, len(embeds), 10):
+            await message.channel.send(embeds=embeds[i : i + 10])
+
+    async def _handle_tasks_pending_dm(self, message: discord.Message) -> None:
+        if not self._notion_client:
+            await message.channel.send(embed=_embed_error("❌ Notion não configurado", "Defina `NOTION_TOKEN` e `NOTION_DATABASE_ID`."))
+            return
+
+        try:
+            tasks = await self._notion_client.fetch_tasks()
+        except Exception as exc:
+            self._logger.error("Failed to fetch Notion tasks", extra={"context": {"error": str(exc)}})
+            await message.channel.send(embed=_embed_error("❌ Erro ao buscar tarefas", f"```{exc}```"))
+            return
+
+        pending = [t for t in tasks if (t.get("property_status") or "").lower() != "done"]
+        if not pending:
+            await message.channel.send(embed=_embed_info("Todas as tarefas estão concluídas! 🎉"))
+            return
+
+        embeds = self._build_task_embeds(pending, title_prefix="📋 Tarefas pendentes")
         for i in range(0, len(embeds), 10):
             await message.channel.send(embeds=embeds[i : i + 10])
 
@@ -934,59 +1008,59 @@ class VoiceWatcherClient(discord.Client):
     # ------------------------------------------------------------------
 
     async def _log_monitored_channel_status(self) -> None:
-        monitored_channel_id = self._voice_listener.voice_channel_id
-        channel = self.get_channel(monitored_channel_id)
+        for monitored_channel_id in self._voice_listener.voice_channel_ids:
+            channel = self.get_channel(monitored_channel_id)
 
-        if channel is None:
-            try:
-                channel = await self.fetch_channel(monitored_channel_id)
-            except discord.NotFound:
-                self._logger.error(
-                    "Monitored channel not found",
-                    extra={"context": {"channel_id": str(monitored_channel_id)}},
-                )
-                return
-            except discord.Forbidden:
-                self._logger.error(
-                    "No permission to access monitored channel",
-                    extra={"context": {"channel_id": str(monitored_channel_id)}},
-                )
-                return
-            except discord.HTTPException as exc:
-                self._logger.error(
-                    "Failed to resolve monitored channel",
+            if channel is None:
+                try:
+                    channel = await self.fetch_channel(monitored_channel_id)
+                except discord.NotFound:
+                    self._logger.error(
+                        "Monitored channel not found",
+                        extra={"context": {"channel_id": str(monitored_channel_id)}},
+                    )
+                    continue
+                except discord.Forbidden:
+                    self._logger.error(
+                        "No permission to access monitored channel",
+                        extra={"context": {"channel_id": str(monitored_channel_id)}},
+                    )
+                    continue
+                except discord.HTTPException as exc:
+                    self._logger.error(
+                        "Failed to resolve monitored channel",
+                        extra={
+                            "context": {
+                                "channel_id": str(monitored_channel_id),
+                                "error": str(exc),
+                            }
+                        },
+                    )
+                    continue
+
+            if not isinstance(channel, (discord.VoiceChannel, discord.StageChannel)):
+                self._logger.warning(
+                    "Configured monitored channel is not a voice channel",
                     extra={
                         "context": {
                             "channel_id": str(monitored_channel_id),
-                            "error": str(exc),
+                            "channel_type": str(channel.type),
                         }
                     },
                 )
-                return
+                continue
 
-        if not isinstance(channel, (discord.VoiceChannel, discord.StageChannel)):
-            self._logger.warning(
-                "Configured monitored channel is not a voice channel",
+            self._logger.info(
+                "Monitoring voice channel is active",
                 extra={
                     "context": {
-                        "channel_id": str(monitored_channel_id),
-                        "channel_type": str(channel.type),
+                        "guild_id": str(channel.guild.id),
+                        "guild_name": channel.guild.name,
+                        "channel_id": str(channel.id),
+                        "channel_name": channel.name,
                     }
                 },
             )
-            return
-
-        self._logger.info(
-            "Monitoring voice channel is active",
-            extra={
-                "context": {
-                    "guild_id": str(channel.guild.id),
-                    "guild_name": channel.guild.name,
-                    "channel_id": str(channel.id),
-                    "channel_name": channel.name,
-                }
-            },
-        )
 
     async def _log_julgar_channel_status(self) -> None:
         monitored_channel_id = self._julgar_listener.text_channel_id
