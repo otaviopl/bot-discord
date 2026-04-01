@@ -30,7 +30,6 @@ class JulgarListener:
 
         content = message.content.strip().lower()
         if content == "!help":
-            await message.channel.send(self._build_help_text())
             return
 
         if content == "!julgar-regras":

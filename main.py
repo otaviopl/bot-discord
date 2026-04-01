@@ -32,12 +32,12 @@ def main() -> None:
     )
 
     voice_listener = VoiceListener(
-        voice_channel_id=settings.voice_channel_id,
+        voice_channel_ids=settings.voice_channel_ids,
         webhook=webhook_dispatcher,
     )
     julgar_listener = JulgarListener(
         text_channel_id=settings.julgar_channel_id,
-        adm_voice_channel_id=settings.voice_channel_id,
+        adm_voice_channel_id=settings.voice_channel_ids[0],
     )
 
     notion_client = None
