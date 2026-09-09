@@ -37,3 +37,9 @@ Thumbs.db
 
 # Google OAuth token (contém credenciais sensíveis)
 calendar_token.json
+
+# Banco do modulo Spotify (tokens cifrados + escutas)
+spotify.db
+spotify.db-wal
+spotify.db-shm
+data/

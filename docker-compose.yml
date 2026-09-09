@@ -9,6 +9,11 @@ services:
       - .env
     ports:
       - "${CALENDAR_OAUTH_PORT:-8080}:${CALENDAR_OAUTH_PORT:-8080}"
+      - "${SPOTIFY_OAUTH_PORT:-8888}:${SPOTIFY_OAUTH_PORT:-8888}"
+    volumes:
+      - bot-data:/data
+    networks:
+      - dokploy-network
     environment:
       DISCORD_BOT_TOKEN: ${DISCORD_BOT_TOKEN:?set DISCORD_BOT_TOKEN in .env}
       VOICE_CHANNEL_ID: ${VOICE_CHANNEL_ID:?set VOICE_CHANNEL_ID in .env}
@@ -25,3 +30,22 @@ services:
       CALENDAR_REDIRECT_URI: ${CALENDAR_REDIRECT_URI:-http://localhost:8080/oauth2callback}
       CALENDAR_OAUTH_PORT: ${CALENDAR_OAUTH_PORT:-8080}
       CALENDAR_TIMEZONE: ${CALENDAR_TIMEZONE:-America/Sao_Paulo}
+      SPOTIFY_CLIENT_ID: ${SPOTIFY_CLIENT_ID:-}
+      SPOTIFY_CLIENT_SECRET: ${SPOTIFY_CLIENT_SECRET:-}
+      SPOTIFY_REDIRECT_URI: ${SPOTIFY_REDIRECT_URI:-}
+      SPOTIFY_OAUTH_HOST: ${SPOTIFY_OAUTH_HOST:-0.0.0.0}
+      SPOTIFY_OAUTH_PORT: ${SPOTIFY_OAUTH_PORT:-8888}
+      SPOTIFY_GUILD_ID: ${SPOTIFY_GUILD_ID:-}
+      SPOTIFY_CHANNEL_ID: ${SPOTIFY_CHANNEL_ID:-}
+      SPOTIFY_USER_IDS: ${SPOTIFY_USER_IDS:-}
+      SPOTIFY_DB_PATH: ${SPOTIFY_DB_PATH:-/data/spotify.db}
+      SPOTIFY_ENCRYPTION_KEY: ${SPOTIFY_ENCRYPTION_KEY:-}
+
+volumes:
+  bot-data:
+
+networks:
+  # Rede do Traefik do Dokploy: e por ela que o dominio HTTPS chega no callback.
+  # Rodando fora do Dokploy, crie a rede antes: docker network create dokploy-network
+  dokploy-network:
+    external: true

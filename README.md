@@ -97,6 +97,33 @@ docker compose logs -f
 docker compose down
 ```
 
+## 5.2) Modulo Spotify do casal (opcional)
+
+Painel do que cada um esta ouvindo, comparativo de escutas e resumo semanal, restrito a um
+servidor, um canal e dois IDs de usuario.
+
+| Comando | O que faz |
+| --- | --- |
+| `!conectar` | Envia no DM um link privado para autorizar a propria conta do Spotify |
+| `!agora` | Reproducao atual das duas contas |
+| `!top [@pessoa] [4-semanas\|6-meses\|1-ano]` | Top 10 do ranking do Spotify |
+| `!comparar [semana\|passada]` | Reproducoes, top 5 de cada um e faixas em comum |
+| `!desconectar` | Revoga a conexao e apaga os dados guardados |
+| `!spotify` | Ajuda do modulo |
+
+Automatico: painel fixado atualizado a cada 60s, coleta do historico recente a cada 2 minutos e
+resumo semanal aos domingos as 20h de Brasilia.
+
+O modulo so liga se `SPOTIFY_CLIENT_ID`, `SPOTIFY_CLIENT_SECRET`, `SPOTIFY_GUILD_ID`,
+`SPOTIFY_CHANNEL_ID`, `SPOTIFY_USER_IDS` e `SPOTIFY_ENCRYPTION_KEY` estiverem definidos.
+Sem isso o bot roda exatamente como antes.
+
+> **Ranking do Spotify != escutas registradas pelo bot.** O `!top` vem pronto do Spotify;
+> o `!comparar` e o resumo semanal contam so o que o bot registrou a partir do `!conectar`.
+
+Passo a passo completo (cadastro do app, Premium exigido desde fev/2026, callback HTTPS,
+permissoes, backup do SQLite e comportamento em falhas): **[docs/SPOTIFY.md](docs/SPOTIFY.md)**.
+
 ## 6) Observacoes sobre limitacoes da API (texto x voz)
 
 - Presenca e estado de voz sao recebidos via **Gateway events**, nao via REST.
@@ -113,12 +140,39 @@ discord-voice-watcher-bot/
 │   ├── config.py
 │   ├── client.py
 │   ├── voice_listener.py
+│   ├── julgar_listener.py
+│   ├── calendar_auth.py
+│   ├── calendar_client.py
+│   ├── calendar_listener.py
+│   ├── notion_client.py
+│   ├── shift_manager.py
+│   ├── shift_views.py
+│   ├── task_views.py
+│   ├── timer_manager.py
+│   ├── spotify_auth.py       # OAuth por usuario + servidor de callback
+│   ├── spotify_client.py     # chamadas a Spotify Web API
+│   ├── spotify_format.py     # janelas de tempo (fuso BR) e embeds
+│   ├── spotify_listener.py   # comandos, painel, coleta e resumo semanal
+│   ├── spotify_store.py      # SQLite: tokens cifrados e escutas
 │   ├── webhook.py
 │   └── logger.py
+├── docs/
+│   └── SPOTIFY.md
+├── tests/
 ├── .env.example
 ├── requirements.txt
+├── requirements-dev.txt
+├── docker-compose.yml
 ├── main.py
 └── README.md
+```
+
+## Testes
+
+```bash
+python -m venv .venv && source .venv/bin/activate
+pip install -r requirements-dev.txt
+python -m pytest
 ```
 
 ## Payload enviado para o webhook

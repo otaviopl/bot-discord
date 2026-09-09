@@ -23,6 +23,28 @@ class Settings:
     calendar_redirect_uri: str = "http://localhost:8080/oauth2callback"
     calendar_oauth_port: int = 8080
     calendar_timezone: str = "America/Sao_Paulo"
+    # Spotify (opcional)
+    spotify_client_id: Optional[str] = None
+    spotify_client_secret: Optional[str] = None
+    spotify_redirect_uri: str = "https://example.com/spotify/callback"
+    spotify_oauth_host: str = "0.0.0.0"
+    spotify_oauth_port: int = 8888
+    spotify_guild_id: Optional[int] = None
+    spotify_channel_id: Optional[int] = None
+    spotify_user_ids: tuple[int, ...] = ()
+    spotify_db_path: str = "/data/spotify.db"
+    spotify_encryption_key: Optional[str] = None
+
+    @property
+    def spotify_enabled(self) -> bool:
+        return bool(
+            self.spotify_client_id
+            and self.spotify_client_secret
+            and self.spotify_guild_id
+            and self.spotify_channel_id
+            and self.spotify_user_ids
+            and self.spotify_encryption_key
+        )
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -51,6 +73,19 @@ class Settings:
             calendar_oauth_port = 8080
         calendar_timezone = os.getenv("CALENDAR_TIMEZONE", "America/Sao_Paulo")
 
+        spotify_client_id = os.getenv("SPOTIFY_CLIENT_ID") or None
+        spotify_client_secret = os.getenv("SPOTIFY_CLIENT_SECRET") or None
+        spotify_redirect_uri = os.getenv(
+            "SPOTIFY_REDIRECT_URI", "https://example.com/spotify/callback"
+        )
+        spotify_oauth_host = os.getenv("SPOTIFY_OAUTH_HOST", "0.0.0.0")
+        spotify_oauth_port = _optional_int_env("SPOTIFY_OAUTH_PORT") or 8888
+        spotify_guild_id = _optional_int_env("SPOTIFY_GUILD_ID")
+        spotify_channel_id = _optional_int_env("SPOTIFY_CHANNEL_ID")
+        spotify_user_ids = _optional_int_list_env("SPOTIFY_USER_IDS")
+        spotify_db_path = os.getenv("SPOTIFY_DB_PATH", "/data/spotify.db")
+        spotify_encryption_key = os.getenv("SPOTIFY_ENCRYPTION_KEY") or None
+
         return cls(
             discord_bot_token=token,
             voice_channel_ids=voice_channel_ids,
@@ -67,6 +102,16 @@ class Settings:
             calendar_redirect_uri=calendar_redirect_uri,
             calendar_oauth_port=calendar_oauth_port,
             calendar_timezone=calendar_timezone,
+            spotify_client_id=spotify_client_id,
+            spotify_client_secret=spotify_client_secret,
+            spotify_redirect_uri=spotify_redirect_uri,
+            spotify_oauth_host=spotify_oauth_host,
+            spotify_oauth_port=spotify_oauth_port,
+            spotify_guild_id=spotify_guild_id,
+            spotify_channel_id=spotify_channel_id,
+            spotify_user_ids=spotify_user_ids,
+            spotify_db_path=spotify_db_path,
+            spotify_encryption_key=spotify_encryption_key,
         )
 
 
@@ -91,6 +136,26 @@ def _required_int_list_env(key: str, fallback_key: str | None = None) -> tuple[i
         raw = os.getenv(fallback_key)
     if not raw or not raw.strip():
         raise ValueError(f"Missing required environment variable: {key}")
+    try:
+        return tuple(int(v.strip()) for v in raw.split(",") if v.strip())
+    except ValueError as exc:
+        raise ValueError(f"Environment variable {key} must be comma-separated integers") from exc
+
+
+def _optional_int_env(key: str) -> Optional[int]:
+    raw = os.getenv(key)
+    if not raw or not raw.strip():
+        return None
+    try:
+        return int(raw.strip())
+    except ValueError as exc:
+        raise ValueError(f"Environment variable {key} must be a valid integer") from exc
+
+
+def _optional_int_list_env(key: str) -> tuple[int, ...]:
+    raw = os.getenv(key)
+    if not raw or not raw.strip():
+        return ()
     try:
         return tuple(int(v.strip()) for v in raw.split(",") if v.strip())
     except ValueError as exc:
