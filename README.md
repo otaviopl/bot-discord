@@ -108,6 +108,8 @@ servidor, um canal e dois IDs de usuario.
 | `!agora` | Reproducao atual das duas contas |
 | `!top [@pessoa] [4-semanas\|6-meses\|1-ano]` | Top 10 do ranking do Spotify |
 | `!comparar [semana\|passada]` | Reproducoes, top 5 de cada um e faixas em comum |
+| `!minutos [hoje\|semana\|mes\|ano\|tudo]` | Tempo ouvido, combinando estimativa, medicao e historico real |
+| `!importar` | Importa o Extended Streaming History do Spotify (anexe o zip) |
 | `!desconectar` | Revoga a conexao e apaga os dados guardados |
 | `!spotify` | Ajuda do modulo |
 
@@ -120,6 +122,11 @@ Sem isso o bot roda exatamente como antes.
 
 > **Ranking do Spotify != escutas registradas pelo bot.** O `!top` vem pronto do Spotify;
 > o `!comparar` e o resumo semanal contam so o que o bot registrou a partir do `!conectar`.
+
+> **Minutos ouvidos nao existem em nenhum endpoint da API.** O `!minutos` combina tres
+> fontes por precedencia: o historico real importado, a medicao do player enquanto o bot
+> esta no ar, e a estimativa pela duracao das faixas. O embed sempre diz de onde veio cada
+> parte do numero.
 
 Passo a passo completo (cadastro do app, Premium exigido desde fev/2026, callback HTTPS,
 permissoes, backup do SQLite e comportamento em falhas): **[docs/SPOTIFY.md](docs/SPOTIFY.md)**.

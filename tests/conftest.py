@@ -81,12 +81,32 @@ class FakeGuild:
         return self._members.get(user_id)
 
 
+class FakeAttachment:
+    """Anexo do Discord: o bot só usa filename, size e read()."""
+
+    def __init__(self, filename: str, data: bytes) -> None:
+        self.filename = filename
+        self._data = data
+        self.size = len(data)
+
+    async def read(self) -> bytes:
+        return self._data
+
+
 class FakeMessage:
-    def __init__(self, content: str, author: FakeUser, channel: FakeChannel, guild=None) -> None:
+    def __init__(
+        self,
+        content: str,
+        author: FakeUser,
+        channel: FakeChannel,
+        guild=None,
+        attachments=None,
+    ) -> None:
         self.content = content
         self.author = author
         self.channel = channel
         self.guild = guild
+        self.attachments = attachments or []
 
 
 class FakeDiscordClient:

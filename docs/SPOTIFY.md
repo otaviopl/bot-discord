@@ -13,6 +13,8 @@ resumo semanal. Restrito a um servidor, um canal e dois IDs de usuário.
 | `!agora` | Reprodução atual das duas contas |
 | `!top [@pessoa] [período]` | Top 10 músicas e artistas — **ranking do Spotify** |
 | `!comparar [semana\|passada]` | Reproduções, top 5 de cada um e faixas em comum — **escutas registradas pelo bot** |
+| `!minutos [hoje\|semana\|passada\|mes\|mes-passado\|ano\|tudo]` | Tempo ouvido (padrão: mês) |
+| `!importar` | Importa o histórico real do Spotify (anexe o zip) |
 | `!desconectar` | Revoga a conexão local e apaga os dados guardados daquela pessoa |
 | `!spotify` | Ajuda do módulo |
 
@@ -41,6 +43,85 @@ que o rodapé dos embeds avisa que pode haver lacunas.
 
 O bot **não** tem acesso a minutos exatos de escuta, dados do Wrapped, nem ao histórico anterior
 à conexão. Nada disso é exibido como se estivesse disponível.
+
+---
+
+## 1.1 Tempo ouvido: de onde vem o número
+
+**Nenhum endpoint da Spotify Web API devolve minutos ouvidos.** Isso é dado de Wrapped,
+que nunca esteve na API pública. O `!minutos` monta o número a partir de três fontes,
+combinadas por precedência.
+
+| # | Fonte | Precisão | Cobertura | Custo |
+| --- | --- | --- | --- | --- |
+| 1 | **Estimado** — duração da faixa, limitada ao intervalo até a escuta seguinte | Aproximada | Tudo desde o `!conectar` | Zero: usa a coleta que já existe |
+| 2 | **Medido** — avanço real de `progress_ms` do player | Boa | Só enquanto o bot está no ar | Zero: usa o tick do painel |
+| 3 | **Exato** — `ms_played` do Extended Streaming History | Real | Até a data do arquivo | Import manual |
+
+### Como as três se combinam
+
+Cada escuta vira um intervalo de tempo. As fontes são aplicadas da melhor para a pior, e
+o período que uma fonte cobre é **subtraído** das seguintes. Assim um mesmo minuto nunca
+é contado duas vezes, e sempre entra pela melhor fonte que existir para aquele momento:
+
+```
+tempo:     |------- manhã -------|---- tarde ----|--- noite ---|
+importado: |#####################|               |
+medido:    |     (descartado)    |###############|
+estimado:  |     (descartado)    |  (descartado) |#############|
+                   ↓                     ↓              ↓
+resultado:      exato                 medido        estimado
+```
+
+O embed diz a composição — "1h do histórico do Spotify · 30min medidos · 15min estimados" —
+e só omite o `≈` quando não sobra nenhuma parte estimada.
+
+### Por que a camada 1 não soma a duração cheia
+
+Somar `duration_ms` de cada faixa superestima quem pula música: uma faixa de 3 minutos
+abandonada aos 40 segundos contaria 3 minutos. Por isso cada escuta é limitada ao intervalo
+até a escuta seguinte — se a próxima faixa começou 40 segundos depois, contam 40 segundos.
+A última escuta da janela, que não tem próxima, usa a duração cheia.
+
+Onde essa camada ainda erra: pausar no meio de uma faixa e voltar horas depois. A camada 2
+corrige exatamente esses casos enquanto o bot está no ar.
+
+### Camada 2, em detalhe
+
+A cada 60 segundos o painel já consulta o player. A mesma resposta traz `progress_ms`, então
+a medição não custa nenhuma requisição a mais. Entre duas amostras da mesma faixa, o tempo
+ouvido é o quanto o progresso avançou:
+
+- **Pausado** — o progresso não anda, então nada é somado.
+- **Faixa pulada** — só o que tocou de fato entra.
+- **Arrastar a barra para frente** — o avanço é limitado ao tempo de relógio decorrido,
+  então um pulo de 3 minutos não vira 3 minutos ouvidos.
+- **Restart do bot** — a sessão é gravada a cada amostra, então o que já foi medido não se perde;
+  só fica o buraco do tempo em que o bot esteve fora, que a camada 1 cobre.
+
+### Camada 3: o import
+
+O Spotify entrega, mediante pedido, o **Extended Streaming History**: um zip de JSONs com o
+`ms_played` real de cada reprodução — o mesmo dado do Wrapped, cobrindo anos.
+
+1. Spotify → Conta → **Privacidade**
+2. Marque **Extended streaming history** (não o histórico curto de 1 ano)
+3. Confirme pelo e-mail; o arquivo chega em até 30 dias
+4. No Discord: `!importar` com o zip anexado (limite de 25 MB — se passar, mande os
+   `.json` de dentro dele separados)
+
+O parser aceita o formato atual (`Streaming_History_Audio_*.json`) e o antigo
+(`StreamingHistory*.json`), ignora podcasts e descarta reproduções abaixo de 1 segundo.
+Reimportar o mesmo arquivo não duplica nada.
+
+> No arquivo, o campo `ts` marca quando a faixa **parou** de tocar — o início é calculado
+> para trás a partir de `ms_played`. É por isso que o import consegue se encaixar
+> corretamente na linha do tempo junto das outras fontes.
+
+### O que o bot não faz
+
+Não inventa histórico anterior à conexão sem o import, não mostra minutos como se fossem
+exatos quando são estimados, e não busca dados de Wrapped — que não existem na API.
 
 ---
 
@@ -277,3 +358,7 @@ python -m pytest
 A suíte cobre dedupe de escutas, cifragem dos tokens, renovação e revogação de autorização,
 os estados do player, virada de semana no fuso de Brasília, sobrevivência a restart e o
 fluxo completo de OAuth com servidor HTTP real.
+
+Para o tempo ouvido: precedência entre as três fontes sem contagem dupla, faixa pulada,
+pausa, scrub, os dois formatos de arquivo do Spotify, proteção contra zip bomb e a migração
+de bancos criados antes da coluna de duração existir.
