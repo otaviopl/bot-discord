@@ -1,5 +1,6 @@
 """Comandos, painel fixado, coleta de escutas e resumo semanal do Spotify."""
 
+import asyncio
 import logging
 import time
 from datetime import datetime
@@ -15,6 +16,8 @@ from .spotify_client import (
     SpotifyRateLimited,
     SpotifyUnavailable,
 )
+from .spotify_import import ImportError_, parse_upload, resumo as resumo_import
+from .spotify_listening import describe_sources, format_duration, resolve_listening
 from .spotify_format import (
     SPOTIFY_GREEN,
     build_compare_embed,
@@ -23,6 +26,9 @@ from .spotify_format import (
     describe_playback,
     format_day_range,
     iso_week_key,
+    month_bounds,
+    parse_range,
+    today_bounds,
     last_7_days,
     panel_fingerprint,
     parse_period,
@@ -36,7 +42,12 @@ PANEL_MESSAGE_KEY = "panel_message_id"
 WEEKLY_SUMMARY_PREFIX = "weekly_summary:"
 MAX_RECENT_PAGES = 10
 
-COMMANDS = ("!conectar", "!agora", "!top", "!comparar", "!desconectar", "!spotify")
+COMMANDS = (
+    "!conectar", "!agora", "!top", "!comparar", "!desconectar",
+    "!spotify", "!minutos", "!importar",
+)
+
+MAX_IMPORT_BYTES = 25 * 1024 * 1024  # teto de anexo do Discord sem Nitro
 
 
 def _embed_info(description: str) -> discord.Embed:
@@ -77,6 +88,7 @@ class SpotifyListener:
         self._panel_fingerprint: Optional[str] = None
         self._panel_message: Optional[discord.Message] = None
         self._last_playback: Dict[int, Tuple[Dict[str, Any], datetime]] = {}
+        self._progress: Dict[int, Dict[str, Any]] = {}
         self._rate_limited_until: float = 0.0
 
     # ------------------------------------------------------------------ #
@@ -176,6 +188,10 @@ class SpotifyListener:
                 await self._cmd_comparar(message, args)
             elif head == "!desconectar":
                 await self._cmd_desconectar(message)
+            elif head == "!minutos":
+                await self._cmd_minutos(message, args)
+            elif head == "!importar":
+                await self._cmd_importar(message)
         except Exception as exc:
             self._logger.error(
                 "Falha ao executar comando do Spotify",
@@ -201,7 +217,17 @@ class SpotifyListener:
                 "`!agora` — o que cada um está ouvindo agora\n"
                 "`!top [@pessoa] [período]` — top 10 do ranking do Spotify\n"
                 "   períodos: `4-semanas` (padrão), `6-meses`, `1-ano`\n"
-                "`!comparar [semana|passada]` — compara as escutas registradas pelo bot"
+                "`!comparar [semana|passada]` — compara as escutas registradas pelo bot\n"
+                "`!minutos [hoje|semana|mes|ano|tudo]` — tempo ouvido (padrão: mês)"
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="Precisão do tempo ouvido",
+            value=(
+                "`!importar` — anexe o zip do Extended Streaming History do Spotify "
+                "para ter os minutos **reais**, inclusive de antes do bot existir.\n"
+                "Peça em Conta → Privacidade; chega por e-mail em até 30 dias."
             ),
             inline=False,
         )
@@ -264,6 +290,7 @@ class SpotifyListener:
 
         removed = await self._store.delete_account(message.author.id)
         self._last_playback.pop(message.author.id, None)
+        self._progress.pop(message.author.id, None)
         self._panel_fingerprint = None
         self._panel_message = None
 
@@ -430,9 +457,12 @@ class SpotifyListener:
             if first_play is not None and first_play > start_ms:
                 partial_note = "Período parcial: alguém conectou depois do início da janela."
 
+            escuta = await self._listening_for(account.discord_user_id, start_ms, end_ms)
+
             sides.append(
                 {
                     "display_name": display_name,
+                    "listening": escuta,
                     "play_count": await self._store.count_plays(
                         account.discord_user_id, start_ms, end_ms
                     ),
@@ -460,6 +490,211 @@ class SpotifyListener:
             partial_note = "Nenhuma conta conectada ainda."
 
         return build_compare_embed(title, range_label, sides, shared, partial_note)
+
+    # ------------------------------------------------------------------ #
+    # !minutos
+    # ------------------------------------------------------------------ #
+
+    async def _cmd_minutos(self, message: discord.Message, args: List[str]) -> None:
+        janela = parse_range(args[0] if args else None)
+        if janela is None:
+            await message.channel.send(
+                embed=_embed_error(
+                    "Período inválido",
+                    "Use `hoje`, `semana`, `passada`, `mes`, `mes-passado`, `ano` ou `tudo`.",
+                )
+            )
+            return
+
+        agora = datetime.now(self._tz)
+        start_ms, end_ms, rotulo = self._resolve_range(janela, agora)
+
+        contas = await self._store.list_accounts()
+        if not contas:
+            await message.channel.send(
+                embed=_embed_info("Nenhuma conta conectada ainda. Use `!conectar`.")
+            )
+            return
+
+        embed = discord.Embed(
+            title="⏱️ Tempo ouvido",
+            description=rotulo,
+            color=SPOTIFY_GREEN,
+        )
+
+        algum_estimado = False
+        for conta in contas:
+            nome = await self._display_name(conta.discord_user_id, conta)
+            resultado = await self._listening_for(conta.discord_user_id, start_ms, end_ms)
+            algum_estimado = algum_estimado or resultado["estimado_ms"] > 0
+
+            linhas = [f"**{format_duration(resultado['total_ms'])}**"]
+            linhas.append(describe_sources(resultado))
+
+            primeira = await self._store.first_play_at(conta.discord_user_id)
+            if primeira is not None and primeira > start_ms and resultado["exato_ms"] == 0:
+                desde = datetime.fromtimestamp(primeira / 1000, self._tz)
+                linhas.append(f"_dados a partir de {desde.strftime('%d/%m')}_")
+
+            embed.add_field(name=nome, value="\n".join(linhas), inline=True)
+
+        if algum_estimado:
+            embed.set_footer(
+                text="O Spotify não expõe minutos ouvidos: a parte estimada vem da "
+                "duração das faixas. Use !importar para ter o número real."
+            )
+        else:
+            embed.set_footer(text="Número real, vindo do histórico do Spotify.")
+
+        await message.channel.send(embed=embed)
+
+    def _resolve_range(self, janela: str, agora: datetime) -> Tuple[int, int, str]:
+        if janela == "hoje":
+            inicio_ms, fim_ms, inicio, _ = today_bounds(agora)
+            return inicio_ms, min(fim_ms, to_ms(agora)), f"hoje ({inicio.strftime('%d/%m')})"
+        if janela == "semana":
+            inicio_ms, fim_ms, inicio, fim = week_bounds(agora, 0)
+            return inicio_ms, min(fim_ms, to_ms(agora)), f"semana atual ({format_day_range(inicio, fim)})"
+        if janela == "semana-passada":
+            inicio_ms, fim_ms, inicio, fim = week_bounds(agora, -1)
+            return inicio_ms, fim_ms, f"semana passada ({format_day_range(inicio, fim)})"
+        if janela == "mes":
+            inicio_ms, fim_ms, inicio, _ = month_bounds(agora, 0)
+            return inicio_ms, min(fim_ms, to_ms(agora)), f"{inicio.strftime('%B de %Y')}"
+        if janela == "mes-passado":
+            inicio_ms, fim_ms, inicio, _ = month_bounds(agora, -1)
+            return inicio_ms, fim_ms, f"{inicio.strftime('%B de %Y')}"
+        if janela == "ano":
+            inicio = agora.replace(month=1, day=1, hour=0, minute=0, second=0, microsecond=0)
+            return to_ms(inicio), to_ms(agora), f"{inicio.year}"
+        return 0, to_ms(agora), "todo o período registrado"
+
+    async def _listening_for(
+        self, discord_user_id: int, start_ms: int, end_ms: int
+    ) -> Dict[str, Any]:
+        """Combina as três fontes de tempo ouvido para a janela pedida."""
+        return resolve_listening(
+            imported=await self._store.raw_imported(discord_user_id, start_ms, end_ms),
+            measured=await self._store.raw_measured(discord_user_id, start_ms, end_ms),
+            plays=await self._store.raw_plays(discord_user_id, start_ms, end_ms),
+            window_start=start_ms,
+            window_end=end_ms,
+        )
+
+    # ------------------------------------------------------------------ #
+    # !importar
+    # ------------------------------------------------------------------ #
+
+    async def _cmd_importar(self, message: discord.Message) -> None:
+        if await self._store.get_account(message.author.id) is None:
+            await message.channel.send(
+                embed=_embed_info("Conecte sua conta primeiro com `!conectar`.")
+            )
+            return
+
+        if not message.attachments:
+            embed = discord.Embed(
+                title="📥 Importar histórico do Spotify",
+                description=(
+                    "Anexe o arquivo junto do comando `!importar`.\n\n"
+                    "**Como conseguir:**\n"
+                    "1. Spotify → Conta → **Privacidade**\n"
+                    "2. Marque **Extended streaming history** (não o histórico curto)\n"
+                    "3. Confirme pelo e-mail; o zip chega em até 30 dias\n"
+                    "4. Volte aqui e mande `!importar` com o zip anexado\n\n"
+                    "Isso traz os minutos **reais** de cada faixa, inclusive de antes "
+                    "de o bot existir. É o mesmo dado do Wrapped."
+                ),
+                color=SPOTIFY_GREEN,
+            )
+            embed.set_footer(text="Só você consegue importar para a sua própria conta.")
+            await message.channel.send(embed=embed)
+            return
+
+        anexo = message.attachments[0]
+        if anexo.size > MAX_IMPORT_BYTES:
+            await message.channel.send(
+                embed=_embed_error(
+                    "Arquivo grande demais",
+                    f"O anexo tem {anexo.size // (1024 * 1024)} MB e o limite é 25 MB. "
+                    "Mande os `.json` de dentro do zip em partes.",
+                )
+            )
+            return
+
+        async with message.channel.typing():
+            try:
+                dados = await anexo.read()
+            except Exception as exc:
+                self._logger.error(
+                    "Falha ao baixar anexo do import",
+                    extra={"context": {"error": str(exc)}},
+                )
+                await message.channel.send(
+                    embed=_embed_error("❌ Não consegui baixar o anexo", "Tente mandar de novo.")
+                )
+                return
+
+            try:
+                resultado = await asyncio.to_thread(parse_upload, dados, anexo.filename)
+            except ImportError_ as exc:
+                await message.channel.send(
+                    embed=_embed_error("❌ Arquivo não serve", str(exc))
+                )
+                return
+            except Exception as exc:
+                self._logger.error(
+                    "Erro inesperado ao ler arquivo de import",
+                    extra={"context": {"error": str(exc)}},
+                )
+                await message.channel.send(
+                    embed=_embed_error("❌ Não consegui ler o arquivo", f"```{type(exc).__name__}```")
+                )
+                return
+
+            entradas = resultado["entradas"]
+            if not entradas:
+                await message.channel.send(
+                    embed=_embed_info("O arquivo foi lido, mas não tinha nenhuma reprodução de música.")
+                )
+                return
+
+            novas = await self._store.record_imported(message.author.id, entradas)
+
+        stats = resumo_import(entradas)
+        inicio = datetime.fromtimestamp(stats["inicio_ms"] / 1000, self._tz)
+        fim = datetime.fromtimestamp(stats["fim_ms"] / 1000, self._tz)
+
+        embed = discord.Embed(
+            title="✅ Histórico importado",
+            color=SPOTIFY_GREEN,
+            description=(
+                f"**{novas}** reproduções novas de **{stats['total']}** lidas "
+                f"em {resultado['arquivos']} arquivo(s).\n"
+                f"Período: {inicio.strftime('%d/%m/%Y')} a {fim.strftime('%d/%m/%Y')}\n"
+                f"Tempo total no arquivo: **{format_duration(stats['ms'])}**"
+            ),
+        )
+        if novas < stats["total"]:
+            embed.add_field(
+                name="Duplicatas",
+                value=f"{stats['total'] - novas} já estavam no banco e foram ignoradas.",
+                inline=False,
+            )
+        embed.set_footer(text="Esses minutos agora têm prioridade sobre a estimativa em !minutos.")
+
+        self._logger.info(
+            "Historico importado",
+            extra={
+                "context": {
+                    "discord_user_id": str(message.author.id),
+                    "lidas": stats["total"],
+                    "novas": novas,
+                    "arquivos": resultado["arquivos"],
+                }
+            },
+        )
+        await message.channel.send(embed=embed)
 
     # ------------------------------------------------------------------ #
     # Reproducao atual (painel e !agora)
@@ -501,10 +736,77 @@ class SpotifyListener:
             )
             return self._stale_playback(account.discord_user_id)
 
+        await self._sample_progress(account.discord_user_id, state)
+
         playback = describe_playback(state)
         if playback["status"] in ("playing", "paused"):
             self._last_playback[account.discord_user_id] = (playback, datetime.now(self._tz))
         return playback
+
+    async def _sample_progress(
+        self, discord_user_id: int, state: Optional[Dict[str, Any]]
+    ) -> None:
+        """Camada 2 do tempo ouvido: mede o avanco real de `progress_ms`.
+
+        Roda junto do tick do painel, que ja consulta o player, entao nao custa
+        requisicao extra. Pausa nao avanca o progresso, e faixa pulada so acumula o
+        que tocou de fato.
+        """
+        agora = int(time.time() * 1000)
+        anterior = self._progress.get(discord_user_id)
+
+        item = (state or {}).get("item") or {}
+        track_id = item.get("id")
+        progresso = (state or {}).get("progress_ms")
+
+        if not track_id or progresso is None or (state or {}).get("currently_playing_type") != "track":
+            self._progress.pop(discord_user_id, None)  # fecha a sessao; ja esta persistida
+            return
+
+        progresso = int(progresso)
+
+        mesma_faixa = anterior is not None and anterior["track_id"] == track_id
+        recomecou = mesma_faixa and progresso < anterior["progress_ms"]
+
+        if not mesma_faixa or recomecou:
+            # Sessao nova. O progresso atual ja indica o quanto tocou desta faixa.
+            sessao = {
+                "track_id": track_id,
+                "progress_ms": progresso,
+                "wall_ms": agora,
+                "session_start_ms": agora - progresso,
+                "acumulado_ms": progresso,
+            }
+        else:
+            avanco = progresso - anterior["progress_ms"]
+            # O avanco nunca pode passar do tempo de relogio decorrido: isso descarta
+            # pulos para frente na faixa e protege de amostra fora de ordem.
+            teto = max(0, agora - anterior["wall_ms"])
+            avanco = max(0, min(avanco, teto))
+            sessao = {
+                "track_id": track_id,
+                "progress_ms": progresso,
+                "wall_ms": agora,
+                "session_start_ms": anterior["session_start_ms"],
+                "acumulado_ms": anterior["acumulado_ms"] + avanco,
+            }
+
+        self._progress[discord_user_id] = sessao
+
+        if sessao["acumulado_ms"] > 0:
+            try:
+                await self._store.upsert_measured(
+                    discord_user_id=discord_user_id,
+                    track_id=track_id,
+                    started_ms=sessao["session_start_ms"],
+                    ended_ms=agora,
+                    ms_played=sessao["acumulado_ms"],
+                )
+            except Exception as exc:
+                self._logger.warning(
+                    "Falha ao gravar tempo medido",
+                    extra={"context": {"error": str(exc), "discord_user_id": str(discord_user_id)}},
+                )
 
     def _stale_playback(self, discord_user_id: int) -> Dict[str, Any]:
         cached = self._last_playback.get(discord_user_id)

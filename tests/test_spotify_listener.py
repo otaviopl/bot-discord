@@ -107,10 +107,14 @@ async def conectar(store: SpotifyStore, user_id: int, nome: str = "Conta") -> No
     )
 
 
-def mensagem(env, texto: str, autor_id: int = USER_A, canal=None) -> FakeMessage:
+def mensagem(env, texto: str, autor_id: int = USER_A, canal=None, anexos=None) -> FakeMessage:
     canal = canal or env["canal"]
     autor = env["membros"].get(autor_id) or FakeUser(autor_id, "Intruso")
-    return FakeMessage(texto, autor, canal, guild=FakeGuild(GUILD_ID, env["membros"]))
+    return FakeMessage(
+        texto, autor, canal,
+        guild=FakeGuild(GUILD_ID, env["membros"]),
+        attachments=anexos,
+    )
 
 
 # --------------------------------------------------------------------------- #

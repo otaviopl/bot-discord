@@ -33,6 +33,30 @@ PERIOD_LABELS: Dict[str, str] = {
     "long_term": "último ~1 ano",
 }
 
+# Janelas aceitas por !minutos
+RANGE_ALIASES: Dict[str, str] = {
+    "hoje": "hoje",
+    "semana": "semana",
+    "essa": "semana",
+    "atual": "semana",
+    "passada": "semana-passada",
+    "semana-passada": "semana-passada",
+    "mes": "mes",
+    "mês": "mes",
+    "mes-passado": "mes-passado",
+    "mês-passado": "mes-passado",
+    "ano": "ano",
+    "tudo": "tudo",
+    "total": "tudo",
+}
+
+
+def parse_range(raw: Optional[str]) -> Optional[str]:
+    if not raw:
+        return "mes"
+    return RANGE_ALIASES.get(raw.strip().lower())
+
+
 WEEK_ALIASES: Dict[str, int] = {
     "semana": 0,
     "atual": 0,
@@ -103,6 +127,25 @@ def week_bounds(now: datetime, offset: int = 0) -> Tuple[int, int, datetime, dat
     start = monday + timedelta(weeks=offset)
     end = start + timedelta(weeks=1)
     return to_ms(start), to_ms(end), start, end
+
+
+def month_bounds(now: datetime, offset: int = 0) -> Tuple[int, int, datetime, datetime]:
+    """Mes corrente (offset 0) ou anterior (-1), do dia 1 as 00:00 no fuso de `now`."""
+    inicio = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    for _ in range(abs(offset)):
+        if offset < 0:
+            inicio = (inicio - timedelta(days=1)).replace(day=1)
+        else:
+            inicio = (inicio + timedelta(days=32)).replace(day=1)
+
+    fim = (inicio + timedelta(days=32)).replace(day=1)
+    return to_ms(inicio), to_ms(fim), inicio, fim
+
+
+def today_bounds(now: datetime) -> Tuple[int, int, datetime, datetime]:
+    inicio = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    fim = inicio + timedelta(days=1)
+    return to_ms(inicio), to_ms(fim), inicio, fim
 
 
 def last_7_days(now: datetime) -> Tuple[int, int, datetime, datetime]:
@@ -263,7 +306,16 @@ def build_compare_embed(
     )
 
     for side in sides:
-        lines = [f"**{side['play_count']}** reproduções registradas"]
+        lines = []
+
+        escuta = side.get("listening")
+        if escuta and escuta["total_ms"] > 0:
+            from .spotify_listening import format_duration
+
+            marca = "" if escuta["preciso"] else "≈ "
+            lines.append(f"⏱️ {marca}**{format_duration(escuta['total_ms'])}**")
+
+        lines.append(f"**{side['play_count']}** reproduções registradas")
 
         if side["tracks"]:
             lines.append("")

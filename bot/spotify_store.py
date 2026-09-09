@@ -10,6 +10,8 @@ from typing import Any, Dict, List, Optional, Sequence
 
 from cryptography.fernet import Fernet, InvalidToken
 
+MAX_TRACK_MS = 15 * 60 * 1000  # teto para escutas antigas, sem duracao gravada
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS spotify_users (
     discord_user_id   TEXT PRIMARY KEY,
@@ -35,11 +37,43 @@ CREATE TABLE IF NOT EXISTS spotify_plays (
     album_name      TEXT,
     album_image     TEXT,
     track_url       TEXT,
+    duration_ms     INTEGER,
     PRIMARY KEY (discord_user_id, track_id, played_at_ms)
 );
 
 CREATE INDEX IF NOT EXISTS idx_plays_user_time
     ON spotify_plays (discord_user_id, played_at_ms);
+
+-- Camada 2: tempo medido amostrando progress_ms do player.
+CREATE TABLE IF NOT EXISTS spotify_measured (
+    discord_user_id TEXT NOT NULL,
+    track_id        TEXT NOT NULL,
+    started_ms      INTEGER NOT NULL,
+    ended_ms        INTEGER NOT NULL,
+    ms_played       INTEGER NOT NULL,
+    PRIMARY KEY (discord_user_id, track_id, started_ms)
+);
+
+CREATE INDEX IF NOT EXISTS idx_measured_user_time
+    ON spotify_measured (discord_user_id, started_ms);
+
+-- Camada 3: ms_played real, importado do Extended Streaming History.
+-- `ended_ms` vem do campo `ts` do arquivo, que marca quando a faixa PAROU de tocar;
+-- o inicio e calculado para tras a partir de ms_played.
+CREATE TABLE IF NOT EXISTS spotify_imported (
+    discord_user_id TEXT NOT NULL,
+    started_ms      INTEGER NOT NULL,
+    ended_ms        INTEGER NOT NULL,
+    track_key       TEXT NOT NULL,
+    track_id        TEXT,
+    track_name      TEXT,
+    artists         TEXT,
+    ms_played       INTEGER NOT NULL,
+    PRIMARY KEY (discord_user_id, ended_ms, track_key)
+);
+
+CREATE INDEX IF NOT EXISTS idx_imported_user_time
+    ON spotify_imported (discord_user_id, started_ms);
 
 CREATE TABLE IF NOT EXISTS spotify_kv (
     key   TEXT PRIMARY KEY,
@@ -80,6 +114,7 @@ class Play:
     album_name: Optional[str]
     album_image: Optional[str]
     track_url: Optional[str]
+    duration_ms: Optional[int] = None
 
 
 class SpotifyStore:
@@ -97,6 +132,14 @@ class SpotifyStore:
 
         with self._connect() as conn:
             conn.executescript(SCHEMA)
+            self._migrate(conn)
+
+    def _migrate(self, conn: sqlite3.Connection) -> None:
+        """Migracoes aditivas: nunca removem nem reescrevem dados ja gravados."""
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(spotify_plays)")}
+        if "duration_ms" not in columns:
+            conn.execute("ALTER TABLE spotify_plays ADD COLUMN duration_ms INTEGER")
+            self._logger.info("Migracao aplicada: spotify_plays.duration_ms")
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self._db_path, timeout=15.0)
@@ -259,6 +302,8 @@ class SpotifyStore:
                 )
                 total = int(cur.fetchone()[0])
                 conn.execute("DELETE FROM spotify_plays WHERE discord_user_id = ?", (str(discord_user_id),))
+                conn.execute("DELETE FROM spotify_measured WHERE discord_user_id = ?", (str(discord_user_id),))
+                conn.execute("DELETE FROM spotify_imported WHERE discord_user_id = ?", (str(discord_user_id),))
                 conn.execute("DELETE FROM spotify_users WHERE discord_user_id = ?", (str(discord_user_id),))
                 conn.execute(
                     "DELETE FROM spotify_oauth_states WHERE discord_user_id = ?",
@@ -288,6 +333,7 @@ class SpotifyStore:
                 p.album_name,
                 p.album_image,
                 p.track_url,
+                p.duration_ms,
             )
             for p in plays
         ]
@@ -299,8 +345,9 @@ class SpotifyStore:
                     """
                     INSERT OR IGNORE INTO spotify_plays (
                         discord_user_id, track_id, played_at_ms, track_name,
-                        artists, artist_ids, album_name, album_image, track_url
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        artists, artist_ids, album_name, album_image, track_url,
+                        duration_ms
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     rows,
                 )
@@ -435,6 +482,135 @@ class SpotifyStore:
                 return [dict(row) for row in cur.fetchall()]
 
         return await self._run(_op)
+
+    async def raw_plays(
+        self, discord_user_id: int, start_ms: int, end_ms: int
+    ) -> List[Dict[str, Any]]:
+        """Camada 1: escutas do historico recente, com a duracao da faixa."""
+
+        def _op() -> List[sqlite3.Row]:
+            with self._connect() as conn:
+                return conn.execute(
+                    "SELECT played_at_ms, duration_ms, track_id FROM spotify_plays "
+                    "WHERE discord_user_id = ? AND played_at_ms >= ? AND played_at_ms < ? "
+                    "ORDER BY played_at_ms ASC",
+                    (str(discord_user_id), start_ms, end_ms),
+                ).fetchall()
+
+        return [dict(row) for row in await self._run(_op)]
+
+    async def raw_measured(
+        self, discord_user_id: int, start_ms: int, end_ms: int
+    ) -> List[Dict[str, Any]]:
+        """Camada 2: sessoes medidas pela amostragem do player."""
+
+        def _op() -> List[sqlite3.Row]:
+            with self._connect() as conn:
+                return conn.execute(
+                    "SELECT started_ms, ended_ms, ms_played, track_id FROM spotify_measured "
+                    "WHERE discord_user_id = ? AND started_ms < ? AND ended_ms >= ? "
+                    "ORDER BY started_ms ASC",
+                    (str(discord_user_id), end_ms, start_ms),
+                ).fetchall()
+
+        return [dict(row) for row in await self._run(_op)]
+
+    async def raw_imported(
+        self, discord_user_id: int, start_ms: int, end_ms: int
+    ) -> List[Dict[str, Any]]:
+        """Camada 3: ms_played real vindo do arquivo do Spotify."""
+
+        def _op() -> List[sqlite3.Row]:
+            with self._connect() as conn:
+                return conn.execute(
+                    "SELECT started_ms, ended_ms, ms_played, track_id, track_name "
+                    "FROM spotify_imported "
+                    "WHERE discord_user_id = ? AND started_ms < ? AND ended_ms >= ? "
+                    "ORDER BY started_ms ASC",
+                    (str(discord_user_id), end_ms, start_ms),
+                ).fetchall()
+
+        return [dict(row) for row in await self._run(_op)]
+
+    async def upsert_measured(
+        self,
+        discord_user_id: int,
+        track_id: str,
+        started_ms: int,
+        ended_ms: int,
+        ms_played: int,
+    ) -> None:
+        """Grava/atualiza a sessao medida. Persistir a cada amostra evita perder
+        o que ja foi medido se o bot reiniciar no meio de uma faixa."""
+
+        def _op() -> None:
+            with self._connect() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO spotify_measured (
+                        discord_user_id, track_id, started_ms, ended_ms, ms_played
+                    ) VALUES (?, ?, ?, ?, ?)
+                    ON CONFLICT(discord_user_id, track_id, started_ms) DO UPDATE SET
+                        ended_ms  = excluded.ended_ms,
+                        ms_played = excluded.ms_played
+                    """,
+                    (str(discord_user_id), track_id, started_ms, ended_ms, ms_played),
+                )
+
+        await self._run(_op)
+
+    async def record_imported(
+        self, discord_user_id: int, entries: Sequence[Dict[str, Any]]
+    ) -> int:
+        """Insere entradas do arquivo do Spotify, ignorando duplicatas."""
+        if not entries:
+            return 0
+
+        rows = [
+            (
+                str(discord_user_id),
+                entry["started_ms"],
+                entry["ended_ms"],
+                entry["track_key"],
+                entry.get("track_id"),
+                entry.get("track_name"),
+                entry.get("artists"),
+                entry["ms_played"],
+            )
+            for entry in entries
+        ]
+
+        def _op() -> int:
+            with self._connect() as conn:
+                before = conn.total_changes
+                conn.executemany(
+                    """
+                    INSERT OR IGNORE INTO spotify_imported (
+                        discord_user_id, started_ms, ended_ms, track_key,
+                        track_id, track_name, artists, ms_played
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    rows,
+                )
+                return conn.total_changes - before
+
+        return await self._run(_op)
+
+    async def imported_range(self, discord_user_id: int) -> Optional[Dict[str, Any]]:
+        """Menor e maior data importada, para dizer o que o arquivo cobre."""
+
+        def _op() -> Optional[sqlite3.Row]:
+            with self._connect() as conn:
+                return conn.execute(
+                    "SELECT MIN(started_ms) AS inicio, MAX(ended_ms) AS fim, "
+                    "COUNT(*) AS total FROM spotify_imported WHERE discord_user_id = ?",
+                    (str(discord_user_id),),
+                ).fetchone()
+
+        row = await self._run(_op)
+        if row is None or row["total"] == 0:
+            return None
+        return {"inicio": int(row["inicio"]), "fim": int(row["fim"]), "total": int(row["total"])}
 
     async def first_play_at(self, discord_user_id: int) -> Optional[int]:
         def _op() -> Optional[int]:

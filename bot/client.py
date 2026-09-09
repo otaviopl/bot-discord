@@ -75,7 +75,9 @@ def _build_help_embed() -> discord.Embed:
             "`!conectar` / `!desconectar` — liga ou revoga sua conta\n"
             "`!agora` — o que cada um está ouvindo\n"
             "`!top [@pessoa] [período]` — ranking do Spotify\n"
-            "`!comparar [semana|passada]` — escutas registradas pelo bot"
+            "`!comparar [semana|passada]` — escutas registradas pelo bot\n"
+            "`!minutos [hoje|semana|mes|ano]` — tempo ouvido\n"
+            "`!importar` — histórico real do Spotify (anexe o zip)"
         ),
         inline=False,
     )
