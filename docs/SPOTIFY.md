@@ -1,0 +1,279 @@
+# Spotify do casal
+
+Módulo privado do bot: mostra o que cada um está ouvindo, compara rankings e publica um
+resumo semanal. Restrito a um servidor, um canal e dois IDs de usuário.
+
+---
+
+## 1. O que o módulo faz
+
+| Comando | O que responde |
+| --- | --- |
+| `!conectar` | Manda no seu DM um link privado para autorizar sua conta do Spotify |
+| `!agora` | Reprodução atual das duas contas |
+| `!top [@pessoa] [período]` | Top 10 músicas e artistas — **ranking do Spotify** |
+| `!comparar [semana\|passada]` | Reproduções, top 5 de cada um e faixas em comum — **escutas registradas pelo bot** |
+| `!desconectar` | Revoga a conexão local e apaga os dados guardados daquela pessoa |
+| `!spotify` | Ajuda do módulo |
+
+Automático:
+
+- **Painel fixado** no canal, atualizado a cada 60s. Só edita a mensagem quando o conteúdo muda.
+- **Coleta** do histórico recente a cada 2 minutos.
+- **Resumo semanal** aos domingos, 20h de Brasília, cobrindo os 7 dias anteriores.
+
+Períodos aceitos em `!top`: `4-semanas` (padrão), `6-meses`, `1-ano`.
+Períodos aceitos em `!comparar`: `semana` (atual, padrão) e `passada` (anterior).
+A semana vai de segunda 00:00 a domingo 23:59:59, no fuso de Brasília.
+
+### Duas contagens diferentes — não misture
+
+| | Ranking do Spotify (`!top`) | Escutas registradas (`!comparar`, resumo semanal) |
+| --- | --- | --- |
+| Origem | Calculado pelo Spotify | Contado pelo bot, a partir do histórico recente |
+| Cobertura | Todo o seu histórico na plataforma | **Só a partir da data em que você usou `!conectar`** |
+| Precisão | O que o Spotify expõe em `short/medium/long_term` | Pode ter lacunas |
+
+O endpoint de [histórico recente](https://developer.spotify.com/documentation/web-api/reference/get-recently-played)
+devolve no máximo as últimas 50 faixas. Se vocês ouvirem mais de 50 músicas entre duas coletas
+(intervalo de 2 minutos), as mais antigas se perdem. Na prática isso não acontece, mas é por isso
+que o rodapé dos embeds avisa que pode haver lacunas.
+
+O bot **não** tem acesso a minutos exatos de escuta, dados do Wrapped, nem ao histórico anterior
+à conexão. Nada disso é exibido como se estivesse disponível.
+
+---
+
+## 2. Cadastrar o app no Spotify
+
+1. Acesse o [Dashboard do Spotify for Developers](https://developer.spotify.com/dashboard) e crie um app.
+2. O app fica em **Development Mode**. Desde a
+   [migração de fevereiro de 2026](https://developer.spotify.com/documentation/web-api/tutorials/february-2026-migration-guide),
+   isso implica:
+   - **O dono do app precisa manter Spotify Premium ativo.** Se o Premium cair, o app para de funcionar.
+   - Limite de **5 usuários** por app — suficiente para duas contas.
+3. Em **Settings → User Management**, cadastre o e-mail das duas contas do Spotify que vão usar o bot.
+   Contas não cadastradas recebem erro na tela de autorização.
+4. Em **Settings → Redirect URIs**, registre **exatamente** o valor de `SPOTIFY_REDIRECT_URI`
+   (byte a byte, incluindo `https://` e o path).
+5. Copie **Client ID** e **Client Secret** para o `.env`.
+
+Escopos solicitados (só o necessário):
+
+- `user-read-currently-playing` — reprodução atual
+- `user-read-recently-played` — histórico recente
+- `user-top-read` — rankings
+
+O bot **não** pede permissão para controlar a reprodução nem para ler ou alterar playlists.
+
+---
+
+## 3. Callback HTTPS
+
+O bot sobe um servidor HTTP próprio dentro do container, em `SPOTIFY_OAUTH_PORT` (padrão `8888`),
+que atende duas rotas:
+
+- `GET /spotify/callback` — recebe o retorno do Spotify
+- `GET /health` — responde `ok`, útil para healthcheck do proxy
+
+O Spotify exige HTTPS no redirect URI (exceto em loopback `127.0.0.1`), então o proxy do seu
+servidor precisa encaminhar o domínio público para essa porta.
+
+### Este bot, no Dokploy da Teitas
+
+O bot roda como **Compose** no Dokploy (`76.13.227.197`):
+
+| | |
+| --- | --- |
+| Projeto | `bot-discord` |
+| Serviço | `Bot` — appName `botdiscord-bot-dhoste` |
+| Origem | `otaviopl/bot-discord`, branch `main`, **auto-deploy no push** |
+| Serviço no compose | `discord-voice-watcher-bot` |
+| Domínio | **precisa ser criado** — não havia nenhum |
+
+Domínio sugerido: `spotify.teitas.com.br` (o `bot.teitas.com.br` já é do TeitasBot).
+Não existe wildcard em `teitas.com.br`, então é preciso criar o registro A:
+
+```
+Tipo: A   Nome: spotify   Valor: 76.13.227.197   TTL: 300
+```
+
+E no Dokploy, em **Bot → Domains → Add Domain**:
+
+```
+Host:         spotify.teitas.com.br
+Service Name: discord-voice-watcher-bot
+Path:         /
+Port:         8888
+HTTPS:        on
+Certificate:  Let's Encrypt
+```
+
+Com isso, o valor a registrar no Spotify e no `.env`:
+
+```
+SPOTIFY_REDIRECT_URI=https://spotify.teitas.com.br/spotify/callback
+```
+
+> O `docker-compose.yml` declara a rede externa `dokploy-network` — sem ela o Traefik não
+> enxerga o container e o domínio devolve 404. Para rodar o compose fora do Dokploy,
+> crie a rede antes: `docker network create dokploy-network`.
+
+### Dokploy / Traefik (caso geral)
+
+Aponte um domínio (ou um path) para o container na porta `8888`. Com o domínio
+`spotify.seudominio.com`, o `.env` fica:
+
+```
+SPOTIFY_REDIRECT_URI=https://spotify.seudominio.com/spotify/callback
+SPOTIFY_OAUTH_PORT=8888
+```
+
+E o mesmo valor vai em **Redirect URIs** no dashboard do Spotify.
+
+### Nginx
+
+```nginx
+location /spotify/ {
+    proxy_pass http://127.0.0.1:8888;
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-Proto $scheme;
+}
+```
+
+### Testar sem domínio
+
+Para experimentar localmente, o Spotify aceita loopback:
+
+```
+SPOTIFY_REDIRECT_URI=http://127.0.0.1:8888/spotify/callback
+```
+
+Registre esse mesmo valor no dashboard. Funciona só na máquina onde o bot roda.
+
+---
+
+## 4. Configurar o `.env`
+
+Gere a chave que cifra os tokens no banco — **uma única vez**:
+
+```bash
+python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+```
+
+Trocar essa chave depois invalida todos os tokens já salvos e obriga as duas pessoas a rodar
+`!conectar` de novo (o bot detecta isso e segue funcionando, sem quebrar).
+
+Preencha no `.env` (veja `.env.example` para o arquivo completo):
+
+```
+SPOTIFY_CLIENT_ID=...
+SPOTIFY_CLIENT_SECRET=...
+SPOTIFY_REDIRECT_URI=https://spotify.seudominio.com/spotify/callback
+SPOTIFY_OAUTH_HOST=0.0.0.0
+SPOTIFY_OAUTH_PORT=8888
+SPOTIFY_GUILD_ID=...        # ID do servidor
+SPOTIFY_CHANNEL_ID=...      # ID do canal privado do casal
+SPOTIFY_USER_IDS=...,...    # os dois IDs de usuário, separados por vírgula
+SPOTIFY_DB_PATH=/data/spotify.db
+SPOTIFY_ENCRYPTION_KEY=...
+```
+
+Para descobrir os IDs: ative o **Modo desenvolvedor** no Discord
+(Configurações → Avançado) e use "Copiar ID" no servidor, no canal e em cada pessoa.
+O comando `!servers`, que o bot já tinha, também lista os IDs dos canais.
+
+Se qualquer uma dessas variáveis estiver faltando, o módulo do Spotify fica desligado e o resto
+do bot (Notion, Calendar, turnos, timers) continua funcionando normalmente.
+
+---
+
+## 5. Permissões no Discord
+
+O bot precisa, **no canal do casal**:
+
+- Ver Canal
+- Enviar Mensagens
+- Inserir Links (embeds)
+- Gerenciar Mensagens (para fixar o painel)
+- Ver Histórico de Mensagens (para recuperar o painel depois de um restart)
+
+As intents já habilitadas no bot (`message_content`, `members`) são suficientes — não é preciso
+mudar nada no Developer Portal do Discord.
+
+---
+
+## 6. Subir
+
+```bash
+docker compose --env-file .env up -d --build
+```
+
+Acompanhe:
+
+```bash
+docker compose logs -f
+```
+
+No boot, procure a linha `Spotify integration enabled` no log. Se aparecer
+`Spotify integration disabled`, alguma variável obrigatória está faltando.
+
+Depois de subir, cada pessoa manda `!conectar` no canal (ou no DM do bot) e abre o link que
+chega no DM. A contagem de escutas começa nesse momento.
+
+---
+
+## 7. Backup
+
+Tudo do módulo mora em um único arquivo SQLite dentro do volume `bot-data`:
+tokens cifrados, escutas registradas, ID do painel e marcas dos resumos já publicados.
+
+Backup a quente (seguro com o bot rodando, graças ao WAL):
+
+```bash
+docker compose exec discord-voice-watcher-bot \
+  python -c "import sqlite3; sqlite3.connect('/data/spotify.db').backup(sqlite3.connect('/data/backup.db'))"
+docker compose cp discord-voice-watcher-bot:/data/backup.db ./spotify-$(date +%F).db
+```
+
+Restaurar:
+
+```bash
+docker compose stop
+docker compose cp ./spotify-2026-09-09.db discord-voice-watcher-bot:/data/spotify.db
+docker compose start
+```
+
+> O backup contém os tokens cifrados, mas **não** a chave. Guarde `SPOTIFY_ENCRYPTION_KEY`
+> separado do backup — sem ela o arquivo é inútil, e com as duas juntas alguém teria acesso
+> às contas. Não versione nenhum dos dois.
+
+---
+
+## 8. Comportamento em falhas
+
+| Situação | O que acontece |
+| --- | --- |
+| Nada tocando | Painel mostra "Sem reprodução ativa" |
+| Música pausada | Painel mostra "Pausado" com a faixa |
+| Anúncio ou podcast | Painel identifica e não registra como música |
+| Spotify fora do ar | Mantém o último dado conhecido com o horário: "Dados indisponíveis · último às 14:32" |
+| Rate limit (429) | Respeita o `Retry-After` e pausa painel e coleta até o prazo passar |
+| Autorização revogada | Marca a conta, mostra "rode `!conectar`" e para de consultar aquela pessoa |
+| Painel apagado | Recria e fixa na próxima atualização |
+| Restart do serviço | Histórico preservado, painel recuperado pelo ID salvo, resumo da semana não republica |
+| Terceiro usando os comandos | Recusa com "Bot privado" e registra no log |
+
+---
+
+## 9. Rodar os testes
+
+```bash
+python -m venv .venv && source .venv/bin/activate
+pip install -r requirements-dev.txt
+python -m pytest
+```
+
+A suíte cobre dedupe de escutas, cifragem dos tokens, renovação e revogação de autorização,
+os estados do player, virada de semana no fuso de Brasília, sobrevivência a restart e o
+fluxo completo de OAuth com servidor HTTP real.

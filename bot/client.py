@@ -22,6 +22,7 @@ from .shift_manager import (
     serialize_entries,
 )
 from .shift_views import ShiftEditView
+from .spotify_listener import SpotifyListener
 from .task_views import StartTimerFromListView, StatusSelectView, StopTimerSelectView
 from .timer_manager import TimerManager
 from .voice_listener import VoiceListener
@@ -64,6 +65,17 @@ def _build_help_embed() -> discord.Embed:
             "`!shift` — Registra entrada/saída (alterna automático)\n"
             "`!shifts` — Lista turnos recentes com resumo de horas e pausas\n"
             "`!shift-edit` — Editar entradas do último turno"
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="🎧 Spotify",
+        value=(
+            "`!spotify` — ajuda completa do módulo\n"
+            "`!conectar` / `!desconectar` — liga ou revoga sua conta\n"
+            "`!agora` — o que cada um está ouvindo\n"
+            "`!top [@pessoa] [período]` — ranking do Spotify\n"
+            "`!comparar [semana|passada]` — escutas registradas pelo bot"
         ),
         inline=False,
     )
@@ -113,6 +125,7 @@ class VoiceWatcherClient(discord.Client):
         notion_client: Optional[NotionClient] = None,
         timer_manager: Optional[TimerManager] = None,
         calendar_listener: Optional[CalendarListener] = None,
+        spotify_listener: Optional[SpotifyListener] = None,
         target_user_id: Optional[int] = None,
         tz_name: str = "America/Sao_Paulo",
     ) -> None:
@@ -131,6 +144,7 @@ class VoiceWatcherClient(discord.Client):
         self._notion_client = notion_client
         self._timer_manager = timer_manager or TimerManager()
         self._calendar_listener = calendar_listener
+        self._spotify_listener = spotify_listener
         self._target_user_id = target_user_id
         self._tz_name = tz_name
         self._tz = ZoneInfo(tz_name)
@@ -143,6 +157,17 @@ class VoiceWatcherClient(discord.Client):
             dt.time(hour=14, minute=15, tzinfo=self._tz),
         ])(self._on_daily_reminder)
         self._daily_reminders.before_loop(self._wait_until_ready)
+
+        self._spotify_panel_loop = tasks.loop(seconds=60)(self._on_spotify_panel_tick)
+        self._spotify_panel_loop.before_loop(self._wait_until_ready)
+
+        self._spotify_sync_loop = tasks.loop(seconds=120)(self._on_spotify_sync_tick)
+        self._spotify_sync_loop.before_loop(self._wait_until_ready)
+
+        self._spotify_weekly_loop = tasks.loop(
+            time=[dt.time(hour=20, minute=0, tzinfo=self._tz)]
+        )(self._on_spotify_weekly_tick)
+        self._spotify_weekly_loop.before_loop(self._wait_until_ready)
 
     async def _get_status_options(self) -> list:
         if self._status_options_cache:
@@ -171,6 +196,17 @@ class VoiceWatcherClient(discord.Client):
 
         if not self._daily_reminders.is_running():
             self._daily_reminders.start()
+
+        if self._spotify_listener is not None:
+            await self._spotify_listener.start(self)
+            for loop in (
+                self._spotify_panel_loop,
+                self._spotify_sync_loop,
+                self._spotify_weekly_loop,
+            ):
+                if not loop.is_running():
+                    loop.start()
+            self._logger.info("Spotify module started")
 
     async def on_voice_state_update(
         self,
@@ -205,6 +241,9 @@ class VoiceWatcherClient(discord.Client):
         if cmd in self._BOT_COMMANDS:
             await self._handle_command(message, cmd)
             return
+
+        if self._spotify_listener is not None:
+            await self._spotify_listener.handle_message(self, message)
 
         if not isinstance(message.channel, discord.DMChannel):
             await self._julgar_listener.handle_message(self, message)
@@ -257,6 +296,54 @@ class VoiceWatcherClient(discord.Client):
         elif cmd == "!logs off":
             self._dm_log_subscribers.discard(message.author.id)
             await message.channel.send(embed=_embed_info("Logs desativados."))
+
+    # ------------------------------------------------------------------
+    # Spotify (painel, coleta e resumo semanal)
+    # ------------------------------------------------------------------
+
+    async def _on_spotify_panel_tick(self) -> None:
+        if self._spotify_listener is None:
+            return
+        try:
+            await self._spotify_listener.refresh_panel()
+        except Exception as exc:
+            self._logger.error(
+                "Falha ao atualizar o painel do Spotify",
+                extra={"context": {"error": str(exc)}},
+            )
+
+    async def _on_spotify_sync_tick(self) -> None:
+        if self._spotify_listener is None:
+            return
+        try:
+            await self._spotify_listener.sync_recent_plays()
+        except Exception as exc:
+            self._logger.error(
+                "Falha ao coletar escutas do Spotify",
+                extra={"context": {"error": str(exc)}},
+            )
+
+    async def _on_spotify_weekly_tick(self) -> None:
+        if self._spotify_listener is None:
+            return
+        try:
+            await self._spotify_listener.publish_weekly_summary()
+        except Exception as exc:
+            self._logger.error(
+                "Falha ao publicar o resumo semanal do Spotify",
+                extra={"context": {"error": str(exc)}},
+            )
+
+    async def close(self) -> None:
+        if self._spotify_listener is not None:
+            for loop in (
+                self._spotify_panel_loop,
+                self._spotify_sync_loop,
+                self._spotify_weekly_loop,
+            ):
+                loop.cancel()
+            await self._spotify_listener.close()
+        await super().close()
 
     # ------------------------------------------------------------------
     # !servers

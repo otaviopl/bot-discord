@@ -8,6 +8,10 @@ from bot.config import Settings
 from bot.julgar_listener import JulgarListener
 from bot.logger import configure_logging
 from bot.notion_client import NotionClient
+from bot.spotify_auth import SpotifyAuth
+from bot.spotify_client import SpotifyClient
+from bot.spotify_listener import SpotifyListener
+from bot.spotify_store import SpotifyStore
 from bot.timer_manager import TimerManager
 from bot.voice_listener import VoiceListener
 from bot.webhook import WebhookDispatcher
@@ -82,12 +86,65 @@ def main() -> None:
     else:
         logger.info("Google Calendar integration disabled (GOOGLE_CLIENT_ID/GOOGLE_CLIENT_SECRET not set)")
 
+    spotify_listener = None
+    if settings.spotify_enabled:
+        try:
+            import httpx
+
+            spotify_store = SpotifyStore(
+                db_path=settings.spotify_db_path,
+                encryption_key=settings.spotify_encryption_key,
+            )
+            spotify_http = httpx.AsyncClient()
+            spotify_auth = SpotifyAuth(
+                client_id=settings.spotify_client_id,
+                client_secret=settings.spotify_client_secret,
+                redirect_uri=settings.spotify_redirect_uri,
+                store=spotify_store,
+                http=spotify_http,
+            )
+            spotify_listener = SpotifyListener(
+                store=spotify_store,
+                auth=spotify_auth,
+                client=SpotifyClient(spotify_http),
+                guild_id=settings.spotify_guild_id,
+                channel_id=settings.spotify_channel_id,
+                allowed_user_ids=settings.spotify_user_ids,
+                oauth_host=settings.spotify_oauth_host,
+                oauth_port=settings.spotify_oauth_port,
+                tz_name=settings.calendar_timezone,
+                http=spotify_http,
+            )
+            logger.info(
+                "Spotify integration enabled",
+                extra={
+                    "context": {
+                        "channel_id": str(settings.spotify_channel_id),
+                        "users": len(settings.spotify_user_ids),
+                        "db_path": settings.spotify_db_path,
+                        "redirect_uri": settings.spotify_redirect_uri,
+                    }
+                },
+            )
+        except Exception as exc:
+            logger.error(
+                "Failed to initialize Spotify integration",
+                extra={"context": {"error": str(exc)}},
+            )
+            spotify_listener = None
+    else:
+        logger.info(
+            "Spotify integration disabled (defina SPOTIFY_CLIENT_ID, SPOTIFY_CLIENT_SECRET, "
+            "SPOTIFY_GUILD_ID, SPOTIFY_CHANNEL_ID, SPOTIFY_USER_IDS e SPOTIFY_ENCRYPTION_KEY)"
+        )
+
     client = VoiceWatcherClient(
         voice_listener=voice_listener,
         julgar_listener=julgar_listener,
         notion_client=notion_client,
         timer_manager=timer_manager,
         calendar_listener=calendar_listener,
+        spotify_listener=spotify_listener,
         target_user_id=settings.target_user_id,
         tz_name=settings.calendar_timezone,
     )
