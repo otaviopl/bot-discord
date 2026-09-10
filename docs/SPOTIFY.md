@@ -133,8 +133,14 @@ exatos quando são estimados, e não busca dados de Wrapped — que não existem
    isso implica:
    - **O dono do app precisa manter Spotify Premium ativo.** Se o Premium cair, o app para de funcionar.
    - Limite de **5 usuários** por app — suficiente para duas contas.
-3. Em **Settings → User Management**, cadastre o e-mail das duas contas do Spotify que vão usar o bot.
-   Contas não cadastradas recebem erro na tela de autorização.
+3. Em **Settings → User Management**, cadastre **nome e e-mail** das duas contas do Spotify
+   que vão usar o bot. Esse passo é obrigatório e silencioso: uma conta que não está ali
+   **consegue autorizar normalmente** — a tela do Spotify aparece, o token é emitido, o bot
+   confirma "Spotify conectado" — e só depois é barrada, com `403 User not registered in the
+   Developer Dashboard` em toda chamada de API.
+
+   Se alguém autorizou e mesmo assim o bot diz que a conta não está liberada, é esse cadastro
+   que falta. Reconectar não adianta; cadastre a conta e rode `!conectar` uma vez depois.
 4. Em **Settings → Redirect URIs**, registre **exatamente** o valor de `SPOTIFY_REDIRECT_URI`
    (byte a byte, incluindo `https://` e o path).
 5. Copie **Client ID** e **Client Secret** para o `.env`.
@@ -340,7 +346,8 @@ docker compose start
 | Anúncio ou podcast | Painel identifica e não registra como música |
 | Spotify fora do ar | Mantém o último dado conhecido com o horário: "Dados indisponíveis · último às 14:32" |
 | Rate limit (429) | Respeita o `Retry-After` e pausa painel e coleta até o prazo passar |
-| Autorização revogada | Marca a conta, mostra "rode `!conectar`" e para de consultar aquela pessoa |
+| Autorização revogada (401) | Marca a conta, mostra "rode `!conectar`" e para de consultar aquela pessoa |
+| Conta não cadastrada no app (403) | Explica que falta o cadastro em User Management; **não** pede reconexão, porque reconectar não resolve |
 | Painel apagado | Recria e fixa na próxima atualização |
 | Restart do serviço | Histórico preservado, painel recuperado pelo ID salvo, resumo da semana não republica |
 | Terceiro usando os comandos | Recusa com "Bot privado" e registra no log |

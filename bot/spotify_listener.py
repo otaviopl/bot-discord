@@ -13,6 +13,7 @@ from .spotify_auth import SpotifyAuth
 from .spotify_client import (
     SpotifyAuthError,
     SpotifyClient,
+    SpotifyForbidden,
     SpotifyRateLimited,
     SpotifyUnavailable,
 )
@@ -56,6 +57,27 @@ def _embed_info(description: str) -> discord.Embed:
 
 def _embed_error(title: str, description: str = "") -> discord.Embed:
     return discord.Embed(title=title, description=description, color=discord.Color.red())
+
+
+def _embed_forbidden(nome: str, exc: SpotifyForbidden) -> discord.Embed:
+    """403 nao e expiracao: reconectar nao resolve, entao a mensagem tem que dizer
+    o que de fato precisa ser feito."""
+    if exc.conta_nao_cadastrada:
+        return _embed_error(
+            "🚫 Conta não liberada no app do Spotify",
+            f"A conta de **{nome}** autorizou normalmente, mas o app está em "
+            "Development Mode e só aceita contas cadastradas.\n\n"
+            "**Como resolver:** no [dashboard do Spotify]"
+            "(https://developer.spotify.com/dashboard) → o app → **Settings** → "
+            "**User Management** → adicione o nome e o e-mail da conta dela.\n"
+            "Depois é só rodar `!conectar` mais uma vez.\n\n"
+            "_Reconectar antes disso não resolve: o problema é o cadastro, não a autorização._",
+        )
+    return _embed_error(
+        "🚫 Spotify recusou a consulta",
+        f"A conta de **{nome}** está conectada, mas o Spotify negou o acesso:\n"
+        f"```{exc.motivo}```",
+    )
 
 
 class SpotifyListener:
@@ -374,6 +396,14 @@ class SpotifyListener:
                 token = await self._auth.get_valid_access_token(account)
                 tracks = await self._api.top_items(token, "tracks", period, limit=10)
                 artists = await self._api.top_items(token, "artists", period, limit=10)
+            except SpotifyForbidden as exc:
+                # 403 nao e expiracao: nao marca reauth, senao vira loop de !conectar.
+                self._logger.warning(
+                    "Spotify negou o acesso a conta",
+                    extra={"context": {"discord_user_id": str(target_id), "motivo": exc.motivo}},
+                )
+                await message.channel.send(embed=_embed_forbidden(display_name, exc))
+                return
             except SpotifyAuthError:
                 await self._store.mark_needs_reauth(target_id)
                 await message.channel.send(
@@ -723,6 +753,19 @@ class SpotifyListener:
         try:
             token = await self._auth.get_valid_access_token(account)
             state = await self._api.currently_playing(token)
+        except SpotifyForbidden as exc:
+            self._logger.warning(
+                "Spotify negou o acesso a conta no painel",
+                extra={
+                    "context": {
+                        "discord_user_id": str(account.discord_user_id),
+                        "motivo": exc.motivo,
+                    }
+                },
+            )
+            if exc.conta_nao_cadastrada:
+                return {"status": "forbidden", "text": "Conta não liberada no app do Spotify"}
+            return {"status": "forbidden", "text": "Spotify negou o acesso"}
         except SpotifyAuthError:
             await self._store.mark_needs_reauth(account.discord_user_id)
             return {"status": "disconnected", "text": "Autorização expirada — rode `!conectar`"}
@@ -922,6 +965,16 @@ class SpotifyListener:
                 continue
             try:
                 await self._sync_account(account)
+            except SpotifyForbidden as exc:
+                self._logger.warning(
+                    "Coleta bloqueada: Spotify negou o acesso a conta",
+                    extra={
+                        "context": {
+                            "discord_user_id": str(account.discord_user_id),
+                            "motivo": exc.motivo,
+                        }
+                    },
+                )
             except SpotifyAuthError:
                 await self._store.mark_needs_reauth(account.discord_user_id)
                 self._logger.warning(
