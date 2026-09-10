@@ -140,6 +140,32 @@ class SpotifyClient:
         data = await self._get(access_token, "/me/player/recently-played", params=params)
         return data or {"items": [], "cursors": None}
 
+    async def library_contains(
+        self, access_token: str, track_ids: List[str]
+    ) -> Dict[str, bool]:
+        """Diz quais dessas faixas a pessoa tem salvas na biblioteca.
+
+        O endpoint aceita `uris` (nao ids) e no maximo 40 por chamada, entao a lista
+        e quebrada em lotes. Exige o escopo user-library-read.
+        """
+        resultado: Dict[str, bool] = {}
+
+        for inicio in range(0, len(track_ids), 40):
+            lote = track_ids[inicio : inicio + 40]
+            uris = ",".join(f"spotify:track:{tid}" for tid in lote)
+            data = await self._get(access_token, "/me/library/contains", params={"uris": uris})
+
+            marcados = data if isinstance(data, list) else (data or {}).get("contains") or []
+            for track_id, salvo in zip(lote, marcados):
+                resultado[track_id] = bool(salvo)
+
+        return resultado
+
+    async def artist(self, access_token: str, artist_id: str) -> Optional[Dict[str, Any]]:
+        """Dados do artista. O campo `genres` esta marcado como deprecated e volta
+        vazio para muitos artistas — quem chama precisa lidar com isso."""
+        return await self._get(access_token, f"/artists/{artist_id}")
+
     async def top_items(
         self, access_token: str, kind: str, time_range: str, limit: int = 10
     ) -> List[Dict[str, Any]]:

@@ -14,6 +14,8 @@ resumo semanal. Restrito a um servidor, um canal e dois IDs de usuário.
 | `!top [@pessoa] [período]` | Top 10 músicas e artistas — **ranking do Spotify** |
 | `!comparar [semana\|passada]` | Reproduções, top 5 de cada um e faixas em comum — **escutas registradas pelo bot** |
 | `!minutos [hoje\|semana\|passada\|mes\|mes-passado\|ano\|tudo]` | Tempo ouvido (padrão: mês) |
+| `!curtidas [período]` | Músicas que os dois **salvaram** na biblioteca |
+| `!generos [período]` | Perfil de gênero de cada um e onde eles se cruzam |
 | `!importar` | Importa o histórico real do Spotify (anexe o zip) |
 | `!desconectar` | Revoga a conexão local e apaga os dados guardados daquela pessoa |
 | `!spotify` | Ajuda do módulo |
@@ -118,6 +120,28 @@ Reimportar o mesmo arquivo não duplica nada.
 > para trás a partir de `ms_played`. É por isso que o import consegue se encaixar
 > corretamente na linha do tempo junto das outras fontes.
 
+### Curtidas em comum
+
+`!curtidas` cruza as **bibliotecas**, não as escutas. Ouvir pode ser acaso de playlist;
+salvar é intenção — por isso a interseção das bibliotecas diz mais sobre gosto em comum.
+
+O comando pega as músicas que vocês dois mais ouviram no período (até 100), pergunta ao
+Spotify quais estão salvas na biblioteca de cada um (`GET /me/library/contains`, em lotes
+de 40, que é o teto do endpoint) e mostra a interseção, mais quantas cada um salvou sozinho.
+
+### Perfil de gênero, com uma ressalva importante
+
+`!generos` monta o perfil a partir dos artistas mais ouvidos, ponderando cada gênero pelo
+número de escutas, e mostra onde os dois se cruzam.
+
+**O campo `genres` do Spotify está marcado como descontinuado** e volta vazio para muitos
+artistas — incluindo nomes grandes. Não é falha do bot. Por isso o rodapé do comando
+sempre informa a cobertura real ("62% dos artistas tinham gênero classificado"): se o
+número for baixo, é a API que não classificou.
+
+Os gêneros ficam em cache no banco, inclusive os vazios, para não repetir a chamada a cada
+consulta.
+
 ### O que o bot não faz
 
 Não inventa histórico anterior à conexão sem o import, não mostra minutos como se fossem
@@ -150,8 +174,13 @@ Escopos solicitados (só o necessário):
 - `user-read-currently-playing` — reprodução atual
 - `user-read-recently-played` — histórico recente
 - `user-top-read` — rankings
+- `user-library-read` — o que cada um salvou, para o `!curtidas`
 
-O bot **não** pede permissão para controlar a reprodução nem para ler ou alterar playlists.
+O bot **não** pede permissão para controlar a reprodução, alterar a biblioteca nem mexer
+em playlists. Todos os escopos são de leitura.
+
+> Quem conectou antes do `!curtidas` existir não concedeu `user-library-read`. O comando
+> detecta isso e pede um `!conectar` novo, em vez de falhar com erro de permissão.
 
 ---
 

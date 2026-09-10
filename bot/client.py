@@ -77,6 +77,8 @@ def _build_help_embed() -> discord.Embed:
             "`!top [@pessoa] [período]` — ranking do Spotify\n"
             "`!comparar [semana|passada]` — escutas registradas pelo bot\n"
             "`!minutos [hoje|semana|mes|ano]` — tempo ouvido\n"
+            "`!curtidas` — músicas que os dois salvaram\n"
+            "`!generos` — perfil de gênero de cada um\n"
             "`!importar` — histórico real do Spotify (anexe o zip)"
         ),
         inline=False,

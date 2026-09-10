@@ -16,8 +16,18 @@ from .spotify_store import SpotifyAccount, SpotifyStore
 AUTHORIZE_URL = "https://accounts.spotify.com/authorize"
 TOKEN_URL = "https://accounts.spotify.com/api/token"
 
-# Somente o necessario: reproducao atual, historico recente e rankings.
-SCOPES = ("user-read-currently-playing", "user-read-recently-played", "user-top-read")
+# Somente o necessario: reproducao atual, historico recente, rankings e a leitura
+# da biblioteca (para saber o que cada um curtiu). Nada de escrita ou playback.
+SCOPES = (
+    "user-read-currently-playing",
+    "user-read-recently-played",
+    "user-top-read",
+    "user-library-read",
+)
+
+# Quem conectou antes de user-library-read existir precisa reautorizar para os
+# comandos de biblioteca funcionarem.
+SCOPE_BIBLIOTECA = "user-library-read"
 
 STATE_MAX_AGE_SECONDS = 900  # 15 minutos para concluir a autorizacao
 TOKEN_REFRESH_MARGIN_SECONDS = 60

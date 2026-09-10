@@ -49,7 +49,13 @@ def track_payload(track_id="track-1", name="Cinema", artist="Harry Styles", is_p
 def env(tmp_path):
     """Monta listener + dublês do Discord com respostas do Spotify programáveis."""
     store = SpotifyStore(str(tmp_path / "spotify.db"), Fernet.generate_key().decode())
-    respostas = {"currently_playing": httpx.Response(204), "recently_played": None, "top": None}
+    respostas = {
+        "currently_playing": httpx.Response(204),
+        "recently_played": None,
+        "top": None,
+        "library": None,
+        "artist": None,
+    }
 
     def handler(request: httpx.Request) -> httpx.Response:
         path = request.url.path
@@ -65,6 +71,16 @@ def env(tmp_path):
             return resposta(request) if callable(resposta) else resposta
         if path.startswith("/v1/me/top/"):
             return respostas["top"] or httpx.Response(200, json={"items": []})
+        if path == "/v1/me/library/contains":
+            resposta = respostas["library"]
+            if resposta is None:
+                return httpx.Response(200, json=[])
+            return resposta(request) if callable(resposta) else resposta
+        if path.startswith("/v1/artists/"):
+            resposta = respostas["artist"]
+            if resposta is None:
+                return httpx.Response(200, json={"id": path.rsplit("/", 1)[-1], "genres": []})
+            return resposta(request) if callable(resposta) else resposta
         return httpx.Response(404)
 
     http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
@@ -100,10 +116,21 @@ def env(tmp_path):
     }
 
 
-async def conectar(store: SpotifyStore, user_id: int, nome: str = "Conta") -> None:
+ESCOPOS_COMPLETOS = (
+    "user-read-currently-playing user-read-recently-played "
+    "user-top-read user-library-read"
+)
+
+
+async def conectar(
+    store: SpotifyStore,
+    user_id: int,
+    nome: str = "Conta",
+    scope: str = ESCOPOS_COMPLETOS,
+) -> None:
     await store.save_account(
         user_id, f"sp-{user_id}", nome, "access", "refresh",
-        int(time.time()) + 3600, "scope", int(time.time()),
+        int(time.time()) + 3600, scope, int(time.time()),
     )
 
 
