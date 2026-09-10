@@ -198,7 +198,7 @@ def describe_playback(state: Optional[Dict[str, Any]]) -> Dict[str, Any]:
 
 def playback_line(playback: Dict[str, Any]) -> str:
     status = playback["status"]
-    if status in ("idle", "ad", "unsupported", "error", "disconnected"):
+    if status in ("idle", "ad", "unsupported", "error", "disconnected", "forbidden"):
         return f"_{playback['text']}_"
 
     icon = "▶️" if status == "playing" else "⏸️"

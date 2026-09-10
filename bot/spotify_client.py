@@ -16,7 +16,25 @@ TIME_RANGES = {
 
 
 class SpotifyAuthError(Exception):
-    """Token invalido/revogado: exige reconexao pelo usuario."""
+    """401: token invalido ou expirado. Reconectar resolve."""
+
+
+class SpotifyForbidden(Exception):
+    """403: o token e valido, mas a conta nao tem permissao para esta chamada.
+
+    Reconectar NAO resolve — e configuracao do app, nao da autorizacao. O caso
+    comum e a conta nao estar cadastrada em User Management enquanto o app esta
+    em Development Mode: o OAuth completa normalmente e so as chamadas de API
+    sao barradas, o que faz o erro parecer expiracao de token.
+    """
+
+    def __init__(self, message: str, motivo: Optional[str] = None) -> None:
+        super().__init__(message)
+        self.motivo = motivo or message
+
+    @property
+    def conta_nao_cadastrada(self) -> bool:
+        return "not registered" in self.motivo.lower()
 
 
 class SpotifyRateLimited(Exception):
@@ -60,8 +78,15 @@ class SpotifyClient:
                 if not response.content:
                     return None
                 return response.json()
-            if response.status_code in (401, 403):
-                raise SpotifyAuthError(f"{response.status_code}: {response.text[:200]}")
+            if response.status_code == 401:
+                raise SpotifyAuthError(f"401: {response.text[:200]}")
+            if response.status_code == 403:
+                motivo = self._extrair_motivo(response)
+                self._logger.warning(
+                    "Spotify recusou a chamada com 403",
+                    extra={"context": {"path": path, "motivo": motivo}},
+                )
+                raise SpotifyForbidden(f"403: {motivo}", motivo)
             if response.status_code == 429:
                 retry_after = float(response.headers.get("Retry-After", "5"))
                 self._logger.warning(
@@ -78,6 +103,21 @@ class SpotifyClient:
             raise SpotifyUnavailable(f"{response.status_code}: {response.text[:200]}")
 
         raise SpotifyUnavailable("esgotou as tentativas")
+
+    @staticmethod
+    def _extrair_motivo(response: httpx.Response) -> str:
+        """O corpo do erro do Spotify traz a razao exata em error.message."""
+        try:
+            payload = response.json()
+        except ValueError:
+            return response.text[:200]
+        if isinstance(payload, dict):
+            erro = payload.get("error")
+            if isinstance(erro, dict) and erro.get("message"):
+                return str(erro["message"])
+            if isinstance(erro, str):
+                return erro
+        return response.text[:200]
 
     async def current_user(self, access_token: str) -> Dict[str, Any]:
         data = await self._get(access_token, "/me")
