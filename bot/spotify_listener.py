@@ -23,6 +23,7 @@ from .spotify_format import (
     SPOTIFY_GREEN,
     build_compare_embed,
     build_panel_embed,
+    build_sync_embed,
     build_top_embed,
     describe_playback,
     format_day_range,
@@ -41,6 +42,13 @@ from .spotify_store import Play, SpotifyAccount, SpotifyStore
 
 PANEL_MESSAGE_KEY = "panel_message_id"
 WEEKLY_SUMMARY_PREFIX = "weekly_summary:"
+SYNC_PREFIX = "sync:"
+
+# Quanto tempo esperar antes de anunciar a mesma coincidencia de novo. A faixa tem
+# janela curta porque repetir a musica no mesmo dia ja e outra historia; o artista
+# tem janela longa porque um album inteiro geraria um anuncio a cada faixa.
+SYNC_COOLDOWN_TRACK_MS = 3 * 60 * 60 * 1000
+SYNC_COOLDOWN_ARTIST_MS = 8 * 60 * 60 * 1000
 MAX_RECENT_PAGES = 10
 
 COMMANDS = (
@@ -878,6 +886,106 @@ class SpotifyListener:
         return f"Usuário {discord_user_id}"
 
     # ------------------------------------------------------------------ #
+    # Sintonia: os dois ouvindo a mesma coisa
+    # ------------------------------------------------------------------ #
+
+    async def _check_sync(self, channel: Any, entries: List[Dict[str, Any]]) -> None:
+        """Avisa quando as duas contas estao tocando a mesma faixa (ou o mesmo
+        artista) ao mesmo tempo.
+
+        Roda no tick do painel, com os dados que ele ja buscou — nenhuma requisicao
+        a mais. Pausado nao conta: a graca e os dois ouvindo de verdade no mesmo
+        momento.
+        """
+        tocando = [e for e in entries if e["playback"].get("status") == "playing"]
+        if len(tocando) < 2:
+            return
+
+        nomes = [e["display_name"] for e in tocando]
+        agora = int(time.time() * 1000)
+
+        faixas = {e["playback"].get("track_name") for e in tocando}
+        urls = [e["playback"].get("url") for e in tocando if e["playback"].get("url")]
+        imagens = [e["playback"].get("image") for e in tocando if e["playback"].get("image")]
+
+        # Mesma faixa: o caso forte.
+        if len(faixas) == 1 and None not in faixas:
+            titulo = faixas.pop()
+            chave = f"{SYNC_PREFIX}track:{titulo}"
+            if await self._sync_recente(chave, agora, SYNC_COOLDOWN_TRACK_MS):
+                return
+
+            artistas = {e["playback"].get("artists") for e in tocando}
+            await self._anunciar_sync(
+                channel,
+                chave,
+                agora,
+                build_sync_embed(
+                    "track",
+                    nomes,
+                    titulo,
+                    subtitulo=artistas.pop() if len(artistas) == 1 else None,
+                    url=urls[0] if urls else None,
+                    imagem=imagens[0] if imagens else None,
+                ),
+                {"tipo": "faixa", "titulo": titulo},
+            )
+            return
+
+        # Mesmo artista principal, faixas diferentes.
+        principais = {
+            (e["playback"].get("artists") or "").split(", ")[0].strip() for e in tocando
+        }
+        if len(principais) == 1:
+            artista = principais.pop()
+            if not artista:
+                return
+            chave = f"{SYNC_PREFIX}artist:{artista}"
+            if await self._sync_recente(chave, agora, SYNC_COOLDOWN_ARTIST_MS):
+                return
+
+            await self._anunciar_sync(
+                channel,
+                chave,
+                agora,
+                build_sync_embed("artist", nomes, artista, imagem=imagens[0] if imagens else None),
+                {"tipo": "artista", "titulo": artista},
+            )
+
+    async def _sync_recente(self, chave: str, agora: int, cooldown_ms: int) -> bool:
+        """True se essa coincidencia ja foi anunciada ha pouco.
+
+        A marca fica no banco, entao um restart nao faz o bot repetir o anuncio.
+        """
+        anterior = await self._store.get_value(chave)
+        if anterior is None:
+            return False
+        try:
+            return agora - int(anterior) < cooldown_ms
+        except ValueError:
+            return False
+
+    async def _anunciar_sync(
+        self,
+        channel: Any,
+        chave: str,
+        agora: int,
+        embed: discord.Embed,
+        contexto: Dict[str, Any],
+    ) -> None:
+        try:
+            await channel.send(embed=embed)
+        except discord.HTTPException as exc:
+            self._logger.warning(
+                "Falha ao anunciar sintonia",
+                extra={"context": {"error": str(exc)}},
+            )
+            return
+
+        await self._store.set_value(chave, str(agora))
+        self._logger.info("Sintonia anunciada", extra={"context": contexto})
+
+    # ------------------------------------------------------------------ #
     # Painel fixado
     # ------------------------------------------------------------------ #
 
@@ -899,6 +1007,8 @@ class SpotifyListener:
         entries = await self._collect_playback()
         if not entries:
             return
+
+        await self._check_sync(channel, entries)
 
         fingerprint = panel_fingerprint(entries)
         message = await self._get_panel_message(channel)
