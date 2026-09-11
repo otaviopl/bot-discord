@@ -113,7 +113,8 @@ servidor, um canal e dois IDs de usuario.
 | `!desconectar` | Revoga a conexao e apaga os dados guardados |
 | `!spotify` | Ajuda do modulo |
 
-Automatico: painel fixado atualizado a cada 60s, coleta do historico recente a cada 2 minutos e
+Automatico: painel fixado (consulta a cada 60s quem esta tocando, com menos frequencia quem
+esta parado), coleta do historico recente a cada 15 minutos e
 resumo semanal aos domingos as 20h de Brasilia.
 
 O modulo so liga se `SPOTIFY_CLIENT_ID`, `SPOTIFY_CLIENT_SECRET`, `SPOTIFY_GUILD_ID`,
