@@ -9,7 +9,7 @@ from zoneinfo import ZoneInfo
 
 import discord
 
-from .spotify_auth import SpotifyAuth
+from .spotify_auth import SCOPE_BIBLIOTECA, SpotifyAuth
 from .spotify_client import (
     SpotifyAuthError,
     SpotifyClient,
@@ -25,6 +25,7 @@ from .spotify_format import (
     build_panel_embed,
     build_sync_embed,
     build_top_embed,
+    fit_field,
     describe_playback,
     format_day_range,
     iso_week_key,
@@ -64,11 +65,17 @@ POLL_NEGADO_S = 30 * 60  # 403: e configuracao do app; insistir nao muda nada
 AGORA_MAX_IDADE_S = 30   # !agora reaproveita leitura de ate 30s atras
 
 TOP_CACHE_S = 6 * 60 * 60  # o Spotify recalcula os tops no maximo uma vez por dia
+
+# !generos consulta /artists/{id} para cada artista sem genero em cache. Sem teto, a
+# primeira execucao disparava ate 40 chamadas por pessoa de uma vez — pior padrao
+# possivel para a cota. O cache completa aos poucos nas execucoes seguintes.
+GENEROS_NOVOS_POR_VEZ = 10
+GENEROS_PAUSA_S = 0.25
 MAX_RECENT_PAGES = 10
 
 COMMANDS = (
     "!conectar", "!agora", "!top", "!comparar", "!desconectar",
-    "!spotify", "!minutos", "!importar",
+    "!spotify", "!minutos", "!importar", "!curtidas", "!generos", "!gêneros",
 )
 
 MAX_IMPORT_BYTES = 25 * 1024 * 1024  # teto de anexo do Discord sem Nitro
@@ -304,6 +311,10 @@ class SpotifyListener:
                 await self._cmd_minutos(message, args)
             elif head == "!importar":
                 await self._cmd_importar(message)
+            elif head == "!curtidas":
+                await self._cmd_curtidas(message, args)
+            elif head in ("!generos", "!gêneros"):
+                await self._cmd_generos(message, args)
         except Exception as exc:
             self._logger.error(
                 "Falha ao executar comando do Spotify",
@@ -330,7 +341,9 @@ class SpotifyListener:
                 "`!top [@pessoa] [período]` — top 10 do ranking do Spotify\n"
                 "   períodos: `4-semanas` (padrão), `6-meses`, `1-ano`\n"
                 "`!comparar [semana|passada]` — compara as escutas registradas pelo bot\n"
-                "`!minutos [hoje|semana|mes|ano|tudo]` — tempo ouvido (padrão: mês)"
+                "`!minutos [hoje|semana|mes|ano|tudo]` — tempo ouvido (padrão: mês)\n"
+                "`!curtidas [período]` — músicas que os dois salvaram na biblioteca\n"
+                "`!generos [período]` — perfil de gênero de cada um e o que se cruza"
             ),
             inline=False,
         )
@@ -831,6 +844,303 @@ class SpotifyListener:
             },
         )
         await message.channel.send(embed=embed)
+
+    # ------------------------------------------------------------------ #
+    # !curtidas
+    # ------------------------------------------------------------------ #
+
+    async def _cmd_curtidas(self, message: discord.Message, args: List[str]) -> None:
+        """Faixas que os dois ouviram E que os dois salvaram na biblioteca.
+
+        Ouvir pode ser acaso de playlist; salvar e intencao. Por isso a interseccao
+        das bibliotecas diz mais do que a das escutas.
+        """
+        janela = parse_range(args[0] if args else None)
+        if janela is None:
+            await message.channel.send(
+                embed=_embed_error(
+                    "Período inválido",
+                    "Use `hoje`, `semana`, `passada`, `mes`, `ano` ou `tudo`.",
+                )
+            )
+            return
+
+        contas = await self._store.list_accounts()
+        if len(contas) < 2:
+            await message.channel.send(
+                embed=_embed_info("Preciso das duas contas conectadas para comparar bibliotecas.")
+            )
+            return
+
+        sem_escopo = [c for c in contas if not self._tem_escopo_biblioteca(c)]
+        if sem_escopo:
+            nomes = [await self._display_name(c.discord_user_id, c) for c in sem_escopo]
+            await message.channel.send(
+                embed=_embed_error(
+                    "🔑 Falta permissão de biblioteca",
+                    f"{' e '.join(nomes)} conectou antes deste comando existir.\n"
+                    "Rode `!conectar` de novo para autorizar a leitura da biblioteca "
+                    "(`user-library-read`). O bot continua sem poder alterar nada — só ler.",
+                )
+            )
+            return
+
+        agora = datetime.now(self._tz)
+        start_ms, end_ms, rotulo = self._resolve_range(janela, agora)
+
+        async with message.channel.typing():
+            candidatas = await self._store.shared_track_ids(
+                contas[0].discord_user_id, contas[1].discord_user_id, start_ms, end_ms, limit=100
+            )
+            if not candidatas:
+                await message.channel.send(
+                    embed=_embed_info(
+                        f"Vocês não ouviram nenhuma música em comum em {rotulo}."
+                    )
+                )
+                return
+
+            ids = [c["track_id"] for c in candidatas]
+            salvos: Dict[int, Dict[str, bool]] = {}
+
+            for conta in contas:
+                try:
+                    token = await self._auth.get_valid_access_token(conta)
+                    salvos[conta.discord_user_id] = await self._api.library_contains(token, ids)
+                except SpotifyForbidden as exc:
+                    nome = await self._display_name(conta.discord_user_id, conta)
+                    await message.channel.send(embed=_embed_forbidden(nome, exc))
+                    return
+                except SpotifyAuthError:
+                    await self._store.mark_needs_reauth(conta.discord_user_id)
+                    nome = await self._display_name(conta.discord_user_id, conta)
+                    await message.channel.send(
+                        embed=_embed_error(
+                            "🔑 Autorização expirada", f"**{nome}** precisa rodar `!conectar`."
+                        )
+                    )
+                    return
+                except SpotifyRateLimited as exc:
+                    await message.channel.send(
+                        embed=_embed_rate_limited(exc, self._bloqueado_ate())
+                    )
+                    return
+                except SpotifyUnavailable as exc:
+                    self._logger.warning(
+                        "Falha ao consultar biblioteca",
+                        extra={"context": {"error": str(exc)}},
+                    )
+                    await message.channel.send(
+                        embed=_embed_error("📡 Spotify indisponível", "Tente de novo daqui a pouco.")
+                    )
+                    return
+
+        a, b = contas[0].discord_user_id, contas[1].discord_user_id
+        ambos = [
+            c for c in candidatas
+            if salvos[a].get(c["track_id"]) and salvos[b].get(c["track_id"])
+        ]
+
+        embed = discord.Embed(
+            title="💚 Curtidas em comum",
+            description=f"Músicas que vocês dois salvaram na biblioteca — {rotulo}",
+            color=SPOTIFY_GREEN,
+        )
+
+        if ambos:
+            linhas = []
+            for faixa in ambos[:15]:
+                titulo = faixa["track_name"]
+                if faixa.get("track_url"):
+                    titulo = f"[{titulo}]({faixa['track_url']})"
+                linhas.append(f"• {titulo} — {faixa['artists']}")
+            embed.add_field(name=f"{len(ambos)} em comum", value=fit_field(linhas), inline=False)
+        else:
+            embed.add_field(
+                name="Nenhuma ainda",
+                value="Vocês ouviram as mesmas músicas, mas nenhuma está salva nas duas bibliotecas.",
+                inline=False,
+            )
+
+        so_a = sum(1 for c in candidatas if salvos[a].get(c["track_id"]) and not salvos[b].get(c["track_id"]))
+        so_b = sum(1 for c in candidatas if salvos[b].get(c["track_id"]) and not salvos[a].get(c["track_id"]))
+        nome_a = await self._display_name(a, contas[0])
+        nome_b = await self._display_name(b, contas[1])
+
+        embed.add_field(
+            name="Salvou só um",
+            value=f"{nome_a}: **{so_a}** · {nome_b}: **{so_b}**",
+            inline=False,
+        )
+        embed.set_footer(
+            text=f"Olhei as {len(candidatas)} músicas que vocês mais ouviram em comum no período."
+        )
+        await message.channel.send(embed=embed)
+
+    def _tem_escopo_biblioteca(self, conta: SpotifyAccount) -> bool:
+        return SCOPE_BIBLIOTECA in (conta.scope or "")
+
+    # ------------------------------------------------------------------ #
+    # !generos
+    # ------------------------------------------------------------------ #
+
+    async def _cmd_generos(self, message: discord.Message, args: List[str]) -> None:
+        janela = parse_range(args[0] if args else None)
+        if janela is None:
+            await message.channel.send(
+                embed=_embed_error("Período inválido", "Use `semana`, `mes`, `ano` ou `tudo`.")
+            )
+            return
+
+        contas = await self._store.list_accounts()
+        if not contas:
+            await message.channel.send(embed=_embed_info("Ninguém conectado ainda."))
+            return
+
+        agora = datetime.now(self._tz)
+        start_ms, end_ms, rotulo = self._resolve_range(janela, agora)
+
+        perfis = []
+        async with message.channel.typing():
+            for conta in contas:
+                nome = await self._display_name(conta.discord_user_id, conta)
+                perfil = await self._perfil_de_genero(conta, start_ms, end_ms)
+                perfil["nome"] = nome
+                perfis.append(perfil)
+
+        embed = discord.Embed(
+            title="🎨 Perfil de gênero",
+            description=f"A partir dos artistas mais ouvidos — {rotulo}",
+            color=SPOTIFY_GREEN,
+        )
+
+        classificados = 0
+        total_artistas = 0
+        pendentes = 0
+
+        for perfil in perfis:
+            classificados += perfil["com_genero"]
+            total_artistas += perfil["artistas"]
+            pendentes += perfil["pendentes"]
+
+            if perfil["generos"]:
+                linhas = [
+                    f"`{pct:>3}%` {genero}" for genero, pct in perfil["generos"][:5]
+                ]
+                valor = "\n".join(linhas)
+            elif perfil["artistas"] == 0 and perfil["pendentes"] == 0:
+                valor = "_Nada registrado neste período._"
+            elif perfil["artistas"] == 0:
+                valor = "_Ainda não consegui consultar estes artistas no Spotify._"
+            else:
+                valor = "_O Spotify não classificou nenhum destes artistas._"
+            embed.add_field(name=perfil["nome"], value=valor, inline=True)
+
+        if len(perfis) >= 2:
+            comuns = self._generos_em_comum(perfis[0], perfis[1])
+            embed.add_field(
+                name="🤝 Onde vocês se encontram",
+                value=fit_field([f"• {g}" for g in comuns[:8]]) if comuns
+                else "_Nenhum gênero em comum entre os artistas classificados._",
+                inline=False,
+            )
+
+        rodape = []
+        if total_artistas:
+            cobertura = round(100 * classificados / total_artistas)
+            rodape.append(
+                f"{cobertura}% dos artistas tinham gênero classificado. "
+                "O Spotify marcou esse campo como descontinuado e devolve vazio "
+                "para muitos artistas — o que falta não é erro do bot."
+            )
+        if pendentes:
+            if self._api.guard.blocked():
+                rodape.append(
+                    f"Spotify em pausa até {self._bloqueado_ate()}: "
+                    f"{pendentes} artista(s) ficaram sem consultar."
+                )
+            else:
+                rodape.append(
+                    f"Faltam {pendentes} artista(s) — para poupar a cota do Spotify, "
+                    f"consulto {GENEROS_NOVOS_POR_VEZ} por vez. Rode de novo para completar."
+                )
+        if rodape:
+            embed.set_footer(text=" ".join(rodape))
+        await message.channel.send(embed=embed)
+
+    async def _perfil_de_genero(
+        self, conta: SpotifyAccount, start_ms: int, end_ms: int
+    ) -> Dict[str, Any]:
+        """Pondera os generos pelo numero de escutas de cada artista."""
+        artistas = await self._store.top_artist_ids(
+            conta.discord_user_id, start_ms, end_ms, limit=40
+        )
+        if not artistas:
+            return {"generos": [], "artistas": 0, "com_genero": 0, "pendentes": 0, "conjunto": set()}
+
+        ids = [a["artist_id"] for a in artistas]
+        cache = await self._store.get_cached_genres(ids)
+        faltando = [aid for aid in ids if aid not in cache]
+
+        if faltando:
+            try:
+                token = await self._auth.get_valid_access_token(conta)
+            except (SpotifyAuthError, SpotifyForbidden):
+                token = None
+
+            if token:
+                # Os mais ouvidos primeiro: sao os que mais pesam no perfil.
+                for posicao, artist_id in enumerate(faltando[:GENEROS_NOVOS_POR_VEZ]):
+                    if posicao:
+                        await asyncio.sleep(GENEROS_PAUSA_S)
+                    try:
+                        dados = await self._api.artist(token, artist_id)
+                    except (SpotifyAuthError, SpotifyForbidden, SpotifyRateLimited, SpotifyUnavailable) as exc:
+                        self._logger.warning(
+                            "Falha ao buscar generos do artista",
+                            extra={"context": {"artist_id": artist_id, "error": str(exc)}},
+                        )
+                        break
+                    generos = (dados or {}).get("genres") or []
+                    cache[artist_id] = generos
+                    # Guarda inclusive o vazio, para nao repetir a chamada.
+                    await self._store.cache_genres(
+                        artist_id, (dados or {}).get("name"), generos, int(time.time())
+                    )
+
+        pontos: Dict[str, int] = {}
+        com_genero = 0
+        for artista in artistas:
+            generos = cache.get(artista["artist_id"]) or []
+            if generos:
+                com_genero += 1
+            for genero in generos:
+                pontos[genero] = pontos.get(genero, 0) + artista["plays"]
+
+        total = sum(pontos.values())
+        ordenados = sorted(pontos.items(), key=lambda item: -item[1])
+        generos = [
+            (genero, round(100 * peso / total)) for genero, peso in ordenados
+        ] if total else []
+
+        pendentes = sum(1 for a in artistas if a["artist_id"] not in cache)
+        consultados = len(artistas) - pendentes
+
+        return {
+            "generos": generos,
+            "artistas": consultados,
+            "com_genero": com_genero,
+            "pendentes": pendentes,
+            "conjunto": set(pontos),
+        }
+
+    @staticmethod
+    def _generos_em_comum(perfil_a: Dict[str, Any], perfil_b: Dict[str, Any]) -> List[str]:
+        comuns = perfil_a["conjunto"] & perfil_b["conjunto"]
+        if not comuns:
+            return []
+        peso = {g: p for g, p in perfil_a["generos"]}
+        return sorted(comuns, key=lambda g: -peso.get(g, 0))
 
     # ------------------------------------------------------------------ #
     # Reproducao atual (painel e !agora)

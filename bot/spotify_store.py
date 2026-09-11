@@ -75,6 +75,16 @@ CREATE TABLE IF NOT EXISTS spotify_imported (
 CREATE INDEX IF NOT EXISTS idx_imported_user_time
     ON spotify_imported (discord_user_id, started_ms);
 
+-- Cache de generos por artista. O campo `genres` do Spotify esta deprecated e volta
+-- vazio para muitos artistas; guardamos o resultado (inclusive o vazio) para nao
+-- repetir a chamada a cada consulta.
+CREATE TABLE IF NOT EXISTS spotify_artist_genres (
+    artist_id  TEXT PRIMARY KEY,
+    name       TEXT,
+    genres     TEXT NOT NULL,
+    fetched_at INTEGER NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS spotify_kv (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
@@ -611,6 +621,110 @@ class SpotifyStore:
         if row is None or row["total"] == 0:
             return None
         return {"inicio": int(row["inicio"]), "fim": int(row["fim"]), "total": int(row["total"])}
+
+    async def top_artist_ids(
+        self, discord_user_id: int, start_ms: int, end_ms: int, limit: int = 40
+    ) -> List[Dict[str, Any]]:
+        """Artistas principais mais ouvidos na janela, com o id do Spotify."""
+
+        def _op() -> List[sqlite3.Row]:
+            with self._connect() as conn:
+                return conn.execute(
+                    "SELECT artist_ids, artists FROM spotify_plays "
+                    "WHERE discord_user_id = ? AND played_at_ms >= ? AND played_at_ms < ?",
+                    (str(discord_user_id), start_ms, end_ms),
+                ).fetchall()
+
+        rows = await self._run(_op)
+        contagem: Dict[str, int] = {}
+        nomes: Dict[str, str] = {}
+
+        for row in rows:
+            try:
+                ids = json.loads(row["artist_ids"] or "[]")
+            except (ValueError, TypeError):
+                ids = []
+            if not ids:
+                continue
+            principal = ids[0]
+            contagem[principal] = contagem.get(principal, 0) + 1
+            nomes.setdefault(principal, (row["artists"] or "").split(", ")[0].strip())
+
+        ordenados = sorted(contagem.items(), key=lambda item: -item[1])[:limit]
+        return [
+            {"artist_id": aid, "name": nomes.get(aid, "?"), "plays": n}
+            for aid, n in ordenados
+        ]
+
+    async def get_cached_genres(self, artist_ids: Sequence[str]) -> Dict[str, List[str]]:
+        if not artist_ids:
+            return {}
+
+        def _op() -> List[sqlite3.Row]:
+            marcadores = ",".join("?" * len(artist_ids))
+            with self._connect() as conn:
+                return conn.execute(
+                    f"SELECT artist_id, genres FROM spotify_artist_genres "
+                    f"WHERE artist_id IN ({marcadores})",
+                    tuple(artist_ids),
+                ).fetchall()
+
+        rows = await self._run(_op)
+        resultado = {}
+        for row in rows:
+            try:
+                resultado[row["artist_id"]] = json.loads(row["genres"])
+            except (ValueError, TypeError):
+                resultado[row["artist_id"]] = []
+        return resultado
+
+    async def cache_genres(
+        self, artist_id: str, name: Optional[str], genres: List[str], fetched_at: int
+    ) -> None:
+        def _op() -> None:
+            with self._connect() as conn:
+                conn.execute(
+                    "INSERT INTO spotify_artist_genres (artist_id, name, genres, fetched_at) "
+                    "VALUES (?, ?, ?, ?) "
+                    "ON CONFLICT(artist_id) DO UPDATE SET "
+                    "name = excluded.name, genres = excluded.genres, "
+                    "fetched_at = excluded.fetched_at",
+                    (artist_id, name, json.dumps(genres, ensure_ascii=False), fetched_at),
+                )
+
+        await self._run(_op)
+
+    async def shared_track_ids(
+        self, user_a: int, user_b: int, start_ms: int, end_ms: int, limit: int = 100
+    ) -> List[Dict[str, Any]]:
+        """Faixas que as duas pessoas ouviram na janela, das mais tocadas para as menos."""
+
+        def _op() -> List[Dict[str, Any]]:
+            with self._connect() as conn:
+                cur = conn.execute(
+                    """
+                    SELECT a.track_id,
+                           MAX(a.track_name) AS track_name,
+                           MAX(a.artists)    AS artists,
+                           MAX(a.track_url)  AS track_url,
+                           COUNT(*) AS plays_a,
+                           (SELECT COUNT(*) FROM spotify_plays b
+                             WHERE b.discord_user_id = ?
+                               AND b.track_id = a.track_id
+                               AND b.played_at_ms >= ? AND b.played_at_ms < ?) AS plays_b
+                      FROM spotify_plays a
+                     WHERE a.discord_user_id = ?
+                       AND a.played_at_ms >= ? AND a.played_at_ms < ?
+                     GROUP BY a.track_id
+                    HAVING plays_b > 0
+                     ORDER BY (plays_a + plays_b) DESC
+                     LIMIT ?
+                    """,
+                    (str(user_b), start_ms, end_ms, str(user_a), start_ms, end_ms, limit),
+                )
+                return [dict(row) for row in cur.fetchall()]
+
+        return await self._run(_op)
 
     async def first_play_at(self, discord_user_id: int) -> Optional[int]:
         def _op() -> Optional[int]:
