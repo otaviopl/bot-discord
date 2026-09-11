@@ -20,6 +20,11 @@ resumo semanal. Restrito a um servidor, um canal e dois IDs de usuário.
 
 Automático:
 
+- **Sintonia** — quando as duas contas estão tocando a mesma faixa ao mesmo tempo, o bot
+  avisa no canal. Faixas diferentes do mesmo artista geram um aviso mais fraco. Roda no
+  tick do painel, sem requisição extra; pausado não conta. Uma mesma faixa não repete o
+  aviso por 3 horas, e um mesmo artista por 8 — senão ouvir um álbum junto viraria um
+  aviso por faixa. A trava fica no banco, então reiniciar o bot não repete nada.
 - **Painel fixado** no canal. Só edita a mensagem quando o conteúdo muda.
 - **Coleta** do histórico recente a cada 15 minutos.
 - **Resumo semanal** aos domingos, 20h de Brasília, cobrindo os 7 dias anteriores.
