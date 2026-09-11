@@ -165,7 +165,9 @@ class VoiceWatcherClient(discord.Client):
         self._spotify_panel_loop = tasks.loop(seconds=60)(self._on_spotify_panel_tick)
         self._spotify_panel_loop.before_loop(self._wait_until_ready)
 
-        self._spotify_sync_loop = tasks.loop(seconds=120)(self._on_spotify_sync_tick)
+        # recently-played guarda as ultimas 50 faixas (~2h30 de musica), entao coletar
+        # a cada 15 min nao perde nada e gasta 1/7 da cota que o intervalo de 2 min gastava.
+        self._spotify_sync_loop = tasks.loop(seconds=900)(self._on_spotify_sync_tick)
         self._spotify_sync_loop.before_loop(self._wait_until_ready)
 
         self._spotify_weekly_loop = tasks.loop(

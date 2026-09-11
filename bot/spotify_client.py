@@ -2,7 +2,8 @@
 
 import asyncio
 import logging
-from typing import Any, Dict, List, Optional
+import time
+from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 import httpx
 
@@ -38,9 +39,55 @@ class SpotifyForbidden(Exception):
 
 
 class SpotifyRateLimited(Exception):
-    def __init__(self, retry_after: float) -> None:
-        super().__init__(f"rate limited, retry after {retry_after}s")
+    """429. `local=True` quando foi o proprio guard que barrou, sem requisicao."""
+
+    def __init__(
+        self, retry_after: float, reason: Optional[str] = None, local: bool = False
+    ) -> None:
+        super().__init__(f"rate limited ({reason or 'sem motivo'}), retry after {retry_after}s")
         self.retry_after = retry_after
+        self.reason = reason
+        self.local = local
+
+    @property
+    def cota_esgotada(self) -> bool:
+        return (self.reason or "").upper() == "QUOTA_EXCEEDED"
+
+
+class RateLimitGuard:
+    """Bloqueio compartilhado por todas as chamadas a API.
+
+    Em Development Mode o 429 vale para o app inteiro, nao para a rota nem para o
+    usuario — e desde jul/2026 existe tambem uma cota por conta de desenvolvedor,
+    cujo estouro devolve Retry-After de horas. Enquanto o bloqueio vale, nenhuma
+    chamada sai: insistir so gasta requisicao e, na pior hipotese, prolonga a pena.
+
+    `on_change` persiste o bloqueio, para um restart nao esquecer e voltar a bater.
+    """
+
+    def __init__(self) -> None:
+        self.until: float = 0.0
+        self.reason: Optional[str] = None
+        self.on_change: Optional[Callable[[float, Optional[str]], Awaitable[None]]] = None
+
+    def remaining(self, now: Optional[float] = None) -> float:
+        return max(0.0, self.until - (now if now is not None else time.time()))
+
+    def blocked(self, now: Optional[float] = None) -> bool:
+        return self.remaining(now) > 0
+
+    def restore(self, until: float, reason: Optional[str]) -> None:
+        self.until = until
+        self.reason = reason
+
+    async def block(self, seconds: float, reason: Optional[str]) -> None:
+        novo = time.time() + seconds
+        if novo <= self.until:
+            return
+        self.until = novo
+        self.reason = reason
+        if self.on_change is not None:
+            await self.on_change(self.until, self.reason)
 
 
 class SpotifyUnavailable(Exception):
@@ -48,8 +95,9 @@ class SpotifyUnavailable(Exception):
 
 
 class SpotifyClient:
-    def __init__(self, http: httpx.AsyncClient) -> None:
+    def __init__(self, http: httpx.AsyncClient, guard: Optional[RateLimitGuard] = None) -> None:
         self._http = http
+        self.guard = guard or RateLimitGuard()
         self._logger = logging.getLogger(__name__)
 
     async def _get(
@@ -60,6 +108,9 @@ class SpotifyClient:
         max_retries: int = 2,
     ) -> Optional[Dict[str, Any]]:
         """GET autenticado. Retorna None em 204 (sem conteudo)."""
+        if self.guard.blocked():
+            raise SpotifyRateLimited(self.guard.remaining(), self.guard.reason, local=True)
+
         url = f"{API_BASE}{path}"
         headers = {"Authorization": f"Bearer {access_token}"}
 
@@ -88,12 +139,23 @@ class SpotifyClient:
                 )
                 raise SpotifyForbidden(f"403: {motivo}", motivo)
             if response.status_code == 429:
-                retry_after = float(response.headers.get("Retry-After", "5"))
+                try:
+                    retry_after = float(response.headers.get("Retry-After", "5"))
+                except ValueError:
+                    retry_after = 5.0
+                reason = self._extrair_razao_429(response)
                 self._logger.warning(
-                    "Spotify rate limit atingido",
-                    extra={"context": {"path": path, "retry_after": retry_after}},
+                    "Spotify bloqueou o app (429)",
+                    extra={
+                        "context": {
+                            "path": path,
+                            "retry_after": retry_after,
+                            "reason": reason,
+                        }
+                    },
                 )
-                raise SpotifyRateLimited(retry_after)
+                await self.guard.block(retry_after, reason)
+                raise SpotifyRateLimited(retry_after, reason)
             if response.status_code >= 500:
                 if attempt >= max_retries:
                     raise SpotifyUnavailable(f"{response.status_code}: {response.text[:200]}")
@@ -103,6 +165,22 @@ class SpotifyClient:
             raise SpotifyUnavailable(f"{response.status_code}: {response.text[:200]}")
 
         raise SpotifyUnavailable("esgotou as tentativas")
+
+    @staticmethod
+    def _extrair_razao_429(response: httpx.Response) -> Optional[str]:
+        """Desde jul/2026 o 429 de cota traz `reason: QUOTA_EXCEEDED` no corpo."""
+        try:
+            payload = response.json()
+        except ValueError:
+            return None
+        if not isinstance(payload, dict):
+            return None
+        if payload.get("reason"):
+            return str(payload["reason"])
+        erro = payload.get("error")
+        if isinstance(erro, dict):
+            return erro.get("reason") or erro.get("message")
+        return None
 
     @staticmethod
     def _extrair_motivo(response: httpx.Response) -> str:

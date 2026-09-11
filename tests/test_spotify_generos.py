@@ -1,6 +1,7 @@
 """!generos — perfil de gênero, com a ressalva de que o campo do Spotify está furado."""
 
 import httpx
+import pytest
 
 from bot.spotify_store import Play
 
@@ -177,3 +178,93 @@ class TestAcesso:
         await conectar(env["store"], USER_A, "Otávio")
         await env["listener"].handle_message(env["discord"], mensagem(env, "!gêneros tudo"))
         assert "Perfil de gênero" in env["canal"].sent[0].title
+
+
+class TestLimiteDeConsultas:
+    """Sem teto, o primeiro !generos disparava até 40 chamadas por pessoa de uma vez."""
+
+    @pytest.fixture(autouse=True)
+    def sem_pausa(self, monkeypatch):
+        import bot.spotify_listener as modulo
+        monkeypatch.setattr(modulo, "GENEROS_PAUSA_S", 0)
+
+    async def _com_artistas(self, env, quantidade):
+        await conectar(env["store"], USER_A, "Otávio")
+        # artista 0 é o mais ouvido, o último é o menos
+        escutas = []
+        offset = 0
+        for i in range(quantidade):
+            for _ in range(quantidade - i):
+                escutas.append(play(USER_A, f"a{i}", f"Band {i}", offset))
+                offset += 1
+        await env["store"].record_plays(escutas)
+
+    async def test_primeira_execucao_consulta_no_maximo_dez(self, env):
+        from bot.spotify_listener import GENEROS_NOVOS_POR_VEZ
+
+        await self._com_artistas(env, 25)
+        chamadas = []
+
+        def handler(request):
+            artist_id = str(request.url.path).rsplit("/", 1)[-1]
+            chamadas.append(artist_id)
+            return httpx.Response(200, json={"id": artist_id, "name": artist_id, "genres": ["rock"]})
+
+        env["respostas"]["artist"] = handler
+
+        await env["listener"].handle_message(env["discord"], mensagem(env, "!generos tudo"))
+
+        assert len(chamadas) == GENEROS_NOVOS_POR_VEZ
+        assert "Faltam 15 artista(s)" in env["canal"].sent[0].footer.text
+
+    async def test_os_mais_ouvidos_vem_primeiro(self, env):
+        await self._com_artistas(env, 25)
+        chamadas = []
+
+        def handler(request):
+            artist_id = str(request.url.path).rsplit("/", 1)[-1]
+            chamadas.append(artist_id)
+            return httpx.Response(200, json={"id": artist_id, "genres": []})
+
+        env["respostas"]["artist"] = handler
+
+        await env["listener"].handle_message(env["discord"], mensagem(env, "!generos tudo"))
+
+        assert chamadas == [f"a{i}" for i in range(10)]
+
+    async def test_execucoes_seguintes_completam_o_cache(self, env):
+        await self._com_artistas(env, 25)
+        chamadas = []
+
+        def handler(request):
+            artist_id = str(request.url.path).rsplit("/", 1)[-1]
+            chamadas.append(artist_id)
+            return httpx.Response(200, json={"id": artist_id, "genres": ["rock"]})
+
+        env["respostas"]["artist"] = handler
+
+        for _ in range(4):
+            await env["listener"].handle_message(env["discord"], mensagem(env, "!generos tudo"))
+
+        assert len(chamadas) == 25, "10 + 10 + 5 e depois nada"
+        assert len(set(chamadas)) == 25, "nenhum artista consultado duas vezes"
+        assert "Faltam" not in (env["canal"].sent[-1].footer.text or "")
+
+    async def test_bloqueio_do_spotify_nao_gasta_chamada(self, env):
+        await self._com_artistas(env, 5)
+        await env["listener"]._api.guard.block(33715, "QUOTA_EXCEEDED")
+        chamadas = []
+
+        def handler(request):
+            chamadas.append(1)
+            return httpx.Response(200, json={"genres": []})
+
+        env["respostas"]["artist"] = handler
+
+        await env["listener"].handle_message(env["discord"], mensagem(env, "!generos tudo"))
+
+        embed = env["canal"].sent[0]
+        assert chamadas == []
+        assert "em pausa" in embed.footer.text
+        assert "Ainda não consegui consultar" in embed.fields[0].value
+        assert "Nada registrado" not in embed.fields[0].value

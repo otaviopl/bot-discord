@@ -17,7 +17,7 @@ from bot.spotify_store import Play, SpotifyStore
 from tests.conftest import FakeAttachment
 # `env` é a fixture compartilhada com os testes do listener — importada de propósito.
 from tests.test_spotify_listener import (  # noqa: F401
-    BRT, USER_A, USER_B, conectar, env, mensagem, track_payload,
+    BRT, USER_A, USER_B, conectar, env, mensagem, proximo_tick, track_payload,
 )
 
 MIN = 60_000
@@ -51,7 +51,7 @@ class TestAmostragem:
         await env["listener"].refresh_panel()
 
         env["respostas"]["currently_playing"] = playing("t1", 70_000)
-        env["listener"]._panel_fingerprint = None
+        proximo_tick(env["listener"])
         await env["listener"].refresh_panel()
 
         sessoes = await env["store"].raw_measured(USER_A, 0, 9_999_999_999_999)
@@ -66,7 +66,7 @@ class TestAmostragem:
         env["respostas"]["currently_playing"] = httpx.Response(200, json=pausado)
 
         await env["listener"].refresh_panel()
-        env["listener"]._panel_fingerprint = None
+        proximo_tick(env["listener"])
         await env["listener"].refresh_panel()
 
         sessoes = await env["store"].raw_measured(USER_A, 0, 9_999_999_999_999)
@@ -78,7 +78,7 @@ class TestAmostragem:
         await env["listener"].refresh_panel()
 
         env["respostas"]["currently_playing"] = playing("t2", 20_000)
-        env["listener"]._panel_fingerprint = None
+        proximo_tick(env["listener"])
         await env["listener"].refresh_panel()
 
         sessoes = await env["store"].raw_measured(USER_A, 0, 9_999_999_999_999)
@@ -91,7 +91,7 @@ class TestAmostragem:
         await env["listener"].refresh_panel()
 
         env["respostas"]["currently_playing"] = playing("t1", 200_000)  # scrub
-        env["listener"]._panel_fingerprint = None
+        proximo_tick(env["listener"])
         await env["listener"].refresh_panel()
 
         sessoes = await env["store"].raw_measured(USER_A, 0, 9_999_999_999_999)

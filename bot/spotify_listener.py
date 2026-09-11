@@ -23,6 +23,7 @@ from .spotify_format import (
     SPOTIFY_GREEN,
     build_compare_embed,
     build_panel_embed,
+    build_sync_embed,
     build_top_embed,
     fit_field,
     describe_playback,
@@ -42,6 +43,34 @@ from .spotify_store import Play, SpotifyAccount, SpotifyStore
 
 PANEL_MESSAGE_KEY = "panel_message_id"
 WEEKLY_SUMMARY_PREFIX = "weekly_summary:"
+SYNC_PREFIX = "sync:"
+
+# Quanto tempo esperar antes de anunciar a mesma coincidencia de novo. A faixa tem
+# janela curta porque repetir a musica no mesmo dia ja e outra historia; o artista
+# tem janela longa porque um album inteiro geraria um anuncio a cada faixa.
+SYNC_COOLDOWN_TRACK_MS = 3 * 60 * 60 * 1000
+SYNC_COOLDOWN_ARTIST_MS = 8 * 60 * 60 * 1000
+
+RATE_LIMIT_KEY = "rate_limit_until"
+RATE_LIMIT_REASON_KEY = "rate_limit_reason"
+
+# Polling adaptativo do player. Em Development Mode existe cota por conta de
+# desenvolvedor, e consultar quem nao esta ouvindo a cada minuto era a maior parte
+# do gasto. So quem esta tocando e consultado a cada tick.
+POLL_TOCANDO_S = 60
+POLL_PAUSADO_S = 120
+POLL_PARADO_S = 300
+POLL_ERRO_S = 120
+POLL_NEGADO_S = 30 * 60  # 403: e configuracao do app; insistir nao muda nada
+AGORA_MAX_IDADE_S = 30   # !agora reaproveita leitura de ate 30s atras
+
+TOP_CACHE_S = 6 * 60 * 60  # o Spotify recalcula os tops no maximo uma vez por dia
+
+# !generos consulta /artists/{id} para cada artista sem genero em cache. Sem teto, a
+# primeira execucao disparava ate 40 chamadas por pessoa de uma vez — pior padrao
+# possivel para a cota. O cache completa aos poucos nas execucoes seguintes.
+GENEROS_NOVOS_POR_VEZ = 10
+GENEROS_PAUSA_S = 0.25
 MAX_RECENT_PAGES = 10
 
 COMMANDS = (
@@ -58,6 +87,37 @@ def _embed_info(description: str) -> discord.Embed:
 
 def _embed_error(title: str, description: str = "") -> discord.Embed:
     return discord.Embed(title=title, description=description, color=discord.Color.red())
+
+
+def _duracao_legivel(segundos: float) -> str:
+    minutos = max(1, int(round(segundos / 60)))
+    if minutos < 60:
+        return f"{minutos}min"
+    horas, resto = divmod(minutos, 60)
+    return f"{horas}h{resto:02d}" if resto else f"{horas}h"
+
+
+def _embed_rate_limited(exc: "SpotifyRateLimited", libera_as: str) -> discord.Embed:
+    """O Retry-After cru ("33715s") nao diz nada. Diz quando volta e se adianta tentar."""
+    espera = _duracao_legivel(exc.retry_after)
+    if exc.cota_esgotada or exc.retry_after >= 3600:
+        motivo = (
+            "Cota do Spotify esgotada."
+            if exc.cota_esgotada
+            else "O Spotify aplicou um bloqueio longo."
+        )
+        return _embed_error(
+            "📉 Spotify em pausa",
+            f"{motivo} O app inteiro fica sem consultar o Spotify até por volta das "
+            f"**{libera_as}** (em {espera}).\n\n"
+            "Não adianta tentar antes: o bloqueio vale para os dois e para todos os "
+            "comandos que falam com o Spotify. `!minutos`, `!comparar` e o resumo "
+            "semanal continuam funcionando — eles usam só o que já foi registrado.",
+        )
+    return _embed_error(
+        "⏳ Muitas consultas seguidas",
+        f"Tente de novo às **{libera_as}** (em {espera}).",
+    )
 
 
 def _embed_forbidden(nome: str, exc: SpotifyForbidden) -> discord.Embed:
@@ -112,7 +172,12 @@ class SpotifyListener:
         self._panel_message: Optional[discord.Message] = None
         self._last_playback: Dict[int, Tuple[Dict[str, Any], datetime]] = {}
         self._progress: Dict[int, Dict[str, Any]] = {}
-        self._rate_limited_until: float = 0.0
+        self._next_poll: Dict[int, float] = {}
+        self._polled_at: Dict[int, float] = {}
+        self._playback_cache: Dict[int, Dict[str, Any]] = {}
+        self._forbidden_until: Dict[int, float] = {}
+        self._top_cache: Dict[Tuple[int, str], Tuple[float, List[Any], List[Any]]] = {}
+        self._blocked_notice: Optional[float] = None
 
     # ------------------------------------------------------------------ #
     # Ciclo de vida
@@ -120,9 +185,40 @@ class SpotifyListener:
 
     async def start(self, client: discord.Client) -> None:
         self._discord = client
+        await self._restaurar_bloqueio()
         await self._auth.start_callback_server(
             self._oauth_host, self._oauth_port, self._on_account_connected
         )
+
+    async def _restaurar_bloqueio(self) -> None:
+        """Um restart nao pode esquecer o 429: o bloqueio e do app, nao do processo."""
+        guard = self._api.guard
+
+        async def persistir(until: float, reason: Optional[str]) -> None:
+            await self._store.set_value(RATE_LIMIT_KEY, str(until))
+            await self._store.set_value(RATE_LIMIT_REASON_KEY, reason or "")
+
+        guard.on_change = persistir
+
+        salvo = await self._store.get_value(RATE_LIMIT_KEY)
+        if not salvo:
+            return
+        try:
+            until = float(salvo)
+        except ValueError:
+            return
+        if until > time.time():
+            reason = await self._store.get_value(RATE_LIMIT_REASON_KEY) or None
+            guard.restore(until, reason)
+            self._logger.warning(
+                "Bloqueio do Spotify restaurado apos restart",
+                extra={"context": {"restante_s": int(until - time.time()), "reason": reason}},
+            )
+
+    def _bloqueado_ate(self) -> str:
+        """Horario local em que o bloqueio acaba, ex.: '18:00'."""
+        fim = datetime.fromtimestamp(self._api.guard.until, self._tz)
+        return fim.strftime("%H:%M")
 
     async def close(self) -> None:
         await self._auth.stop_callback_server()
@@ -320,6 +416,9 @@ class SpotifyListener:
         removed = await self._store.delete_account(message.author.id)
         self._last_playback.pop(message.author.id, None)
         self._progress.pop(message.author.id, None)
+        for agenda in (self._next_poll, self._polled_at, self._playback_cache, self._forbidden_until):
+            agenda.pop(message.author.id, None)
+        self._top_cache = {k: v for k, v in self._top_cache.items() if k[0] != message.author.id}
         self._panel_fingerprint = None
         self._panel_message = None
 
@@ -340,7 +439,7 @@ class SpotifyListener:
     # ------------------------------------------------------------------ #
 
     async def _cmd_agora(self, message: discord.Message) -> None:
-        entries = await self._collect_playback()
+        entries = await self._collect_playback(max_idade_s=AGORA_MAX_IDADE_S)
         if not entries:
             await message.channel.send(
                 embed=_embed_info("Nenhuma conta conectada ainda. Use `!conectar`.")
@@ -398,11 +497,20 @@ class SpotifyListener:
             )
             return
 
+        chave_cache = (target_id, period)
+        guardado = self._top_cache.get(chave_cache)
+        if guardado and time.time() - guardado[0] < TOP_CACHE_S:
+            await message.channel.send(
+                embed=build_top_embed(display_name, period, guardado[1], guardado[2])
+            )
+            return
+
         async with message.channel.typing():
             try:
                 token = await self._auth.get_valid_access_token(account)
                 tracks = await self._api.top_items(token, "tracks", period, limit=10)
                 artists = await self._api.top_items(token, "artists", period, limit=10)
+                self._top_cache[chave_cache] = (time.time(), tracks, artists)
             except SpotifyForbidden as exc:
                 # 403 nao e expiracao: nao marca reauth, senao vira loop de !conectar.
                 self._logger.warning(
@@ -421,12 +529,16 @@ class SpotifyListener:
                 )
                 return
             except SpotifyRateLimited as exc:
-                await message.channel.send(
-                    embed=_embed_error(
-                        "⏳ Limite do Spotify",
-                        f"Tente de novo em {int(exc.retry_after)}s.",
+                if guardado:
+                    # Ranking antigo ainda e melhor que nada: o top muda devagar.
+                    embed = build_top_embed(display_name, period, guardado[1], guardado[2])
+                    embed.set_footer(
+                        text=f"Spotify em pausa até {self._bloqueado_ate()} — "
+                        "mostrando o último ranking consultado."
                     )
-                )
+                    await message.channel.send(embed=embed)
+                    return
+                await message.channel.send(embed=_embed_rate_limited(exc, self._bloqueado_ate()))
                 return
             except SpotifyUnavailable as exc:
                 self._logger.warning(
@@ -808,7 +920,12 @@ class SpotifyListener:
                         )
                     )
                     return
-                except (SpotifyRateLimited, SpotifyUnavailable) as exc:
+                except SpotifyRateLimited as exc:
+                    await message.channel.send(
+                        embed=_embed_rate_limited(exc, self._bloqueado_ate())
+                    )
+                    return
+                except SpotifyUnavailable as exc:
                     self._logger.warning(
                         "Falha ao consultar biblioteca",
                         extra={"context": {"error": str(exc)}},
@@ -899,18 +1016,22 @@ class SpotifyListener:
 
         classificados = 0
         total_artistas = 0
+        pendentes = 0
 
         for perfil in perfis:
             classificados += perfil["com_genero"]
             total_artistas += perfil["artistas"]
+            pendentes += perfil["pendentes"]
 
             if perfil["generos"]:
                 linhas = [
                     f"`{pct:>3}%` {genero}" for genero, pct in perfil["generos"][:5]
                 ]
                 valor = "\n".join(linhas)
-            elif perfil["artistas"] == 0:
+            elif perfil["artistas"] == 0 and perfil["pendentes"] == 0:
                 valor = "_Nada registrado neste período._"
+            elif perfil["artistas"] == 0:
+                valor = "_Ainda não consegui consultar estes artistas no Spotify._"
             else:
                 valor = "_O Spotify não classificou nenhum destes artistas._"
             embed.add_field(name=perfil["nome"], value=valor, inline=True)
@@ -924,13 +1045,27 @@ class SpotifyListener:
                 inline=False,
             )
 
+        rodape = []
         if total_artistas:
             cobertura = round(100 * classificados / total_artistas)
-            embed.set_footer(
-                text=f"{cobertura}% dos artistas tinham gênero classificado. "
+            rodape.append(
+                f"{cobertura}% dos artistas tinham gênero classificado. "
                 "O Spotify marcou esse campo como descontinuado e devolve vazio "
                 "para muitos artistas — o que falta não é erro do bot."
             )
+        if pendentes:
+            if self._api.guard.blocked():
+                rodape.append(
+                    f"Spotify em pausa até {self._bloqueado_ate()}: "
+                    f"{pendentes} artista(s) ficaram sem consultar."
+                )
+            else:
+                rodape.append(
+                    f"Faltam {pendentes} artista(s) — para poupar a cota do Spotify, "
+                    f"consulto {GENEROS_NOVOS_POR_VEZ} por vez. Rode de novo para completar."
+                )
+        if rodape:
+            embed.set_footer(text=" ".join(rodape))
         await message.channel.send(embed=embed)
 
     async def _perfil_de_genero(
@@ -941,7 +1076,7 @@ class SpotifyListener:
             conta.discord_user_id, start_ms, end_ms, limit=40
         )
         if not artistas:
-            return {"generos": [], "artistas": 0, "com_genero": 0, "conjunto": set()}
+            return {"generos": [], "artistas": 0, "com_genero": 0, "pendentes": 0, "conjunto": set()}
 
         ids = [a["artist_id"] for a in artistas]
         cache = await self._store.get_cached_genres(ids)
@@ -954,7 +1089,10 @@ class SpotifyListener:
                 token = None
 
             if token:
-                for artist_id in faltando:
+                # Os mais ouvidos primeiro: sao os que mais pesam no perfil.
+                for posicao, artist_id in enumerate(faltando[:GENEROS_NOVOS_POR_VEZ]):
+                    if posicao:
+                        await asyncio.sleep(GENEROS_PAUSA_S)
                     try:
                         dados = await self._api.artist(token, artist_id)
                     except (SpotifyAuthError, SpotifyForbidden, SpotifyRateLimited, SpotifyUnavailable) as exc:
@@ -985,10 +1123,14 @@ class SpotifyListener:
             (genero, round(100 * peso / total)) for genero, peso in ordenados
         ] if total else []
 
+        pendentes = sum(1 for a in artistas if a["artist_id"] not in cache)
+        consultados = len(artistas) - pendentes
+
         return {
             "generos": generos,
-            "artistas": len(artistas),
+            "artistas": consultados,
             "com_genero": com_genero,
+            "pendentes": pendentes,
             "conjunto": set(pontos),
         }
 
@@ -1004,13 +1146,35 @@ class SpotifyListener:
     # Reproducao atual (painel e !agora)
     # ------------------------------------------------------------------ #
 
-    async def _collect_playback(self) -> List[Dict[str, Any]]:
+    async def _collect_playback(
+        self, max_idade_s: Optional[float] = None
+    ) -> List[Dict[str, Any]]:
+        """Estado do player de cada conta.
+
+        Sem `max_idade_s`, segue a agenda adaptativa: so consulta quem esta na hora.
+        Com `max_idade_s` (usado pelo !agora), consulta quem foi lido ha mais tempo
+        que isso — o pedido e explicito, mas ainda assim nao desperdica leitura fresca.
+        """
         accounts = await self._store.list_accounts()
         entries: List[Dict[str, Any]] = []
+        agora = time.time()
 
         for account in accounts:
-            display_name = await self._display_name(account.discord_user_id, account)
-            playback = await self._playback_for(account)
+            uid = account.discord_user_id
+            display_name = await self._display_name(uid, account)
+
+            if max_idade_s is not None:
+                vencido = agora - self._polled_at.get(uid, 0) >= max_idade_s
+            else:
+                vencido = agora >= self._next_poll.get(uid, 0)
+
+            if vencido or uid not in self._playback_cache:
+                playback = await self._playback_for(account)
+                self._playback_cache[uid] = playback
+                self._polled_at[uid] = agora
+                self._next_poll[uid] = agora + self._intervalo_para(playback)
+            else:
+                playback = self._playback_cache[uid]
             entries.append(
                 {
                     "discord_user_id": account.discord_user_id,
@@ -1019,6 +1183,19 @@ class SpotifyListener:
                 }
             )
         return entries
+
+    @staticmethod
+    def _intervalo_para(playback: Dict[str, Any]) -> int:
+        status = playback.get("status")
+        if status == "playing":
+            return POLL_TOCANDO_S
+        if status == "paused":
+            return POLL_PAUSADO_S
+        if status == "forbidden":
+            return POLL_NEGADO_S
+        if status == "error":
+            return POLL_ERRO_S
+        return POLL_PARADO_S
 
     async def _playback_for(self, account: SpotifyAccount) -> Dict[str, Any]:
         if account.needs_reauth:
@@ -1043,8 +1220,8 @@ class SpotifyListener:
         except SpotifyAuthError:
             await self._store.mark_needs_reauth(account.discord_user_id)
             return {"status": "disconnected", "text": "Autorização expirada — rode `!conectar`"}
-        except SpotifyRateLimited as exc:
-            self._rate_limited_until = time.time() + exc.retry_after
+        except SpotifyRateLimited:
+            # O guard ja registrou e persistiu o bloqueio.
             return self._stale_playback(account.discord_user_id)
         except SpotifyUnavailable as exc:
             self._logger.warning(
@@ -1152,12 +1329,116 @@ class SpotifyListener:
         return f"Usuário {discord_user_id}"
 
     # ------------------------------------------------------------------ #
+    # Sintonia: os dois ouvindo a mesma coisa
+    # ------------------------------------------------------------------ #
+
+    async def _check_sync(self, channel: Any, entries: List[Dict[str, Any]]) -> None:
+        """Avisa quando as duas contas estao tocando a mesma faixa (ou o mesmo
+        artista) ao mesmo tempo.
+
+        Roda no tick do painel, com os dados que ele ja buscou — nenhuma requisicao
+        a mais. Pausado nao conta: a graca e os dois ouvindo de verdade no mesmo
+        momento.
+        """
+        tocando = [e for e in entries if e["playback"].get("status") == "playing"]
+        if len(tocando) < 2:
+            return
+
+        nomes = [e["display_name"] for e in tocando]
+        agora = int(time.time() * 1000)
+
+        faixas = {e["playback"].get("track_name") for e in tocando}
+        urls = [e["playback"].get("url") for e in tocando if e["playback"].get("url")]
+        imagens = [e["playback"].get("image") for e in tocando if e["playback"].get("image")]
+
+        # Mesma faixa: o caso forte.
+        if len(faixas) == 1 and None not in faixas:
+            titulo = faixas.pop()
+            chave = f"{SYNC_PREFIX}track:{titulo}"
+            if await self._sync_recente(chave, agora, SYNC_COOLDOWN_TRACK_MS):
+                return
+
+            artistas = {e["playback"].get("artists") for e in tocando}
+            await self._anunciar_sync(
+                channel,
+                chave,
+                agora,
+                build_sync_embed(
+                    "track",
+                    nomes,
+                    titulo,
+                    subtitulo=artistas.pop() if len(artistas) == 1 else None,
+                    url=urls[0] if urls else None,
+                    imagem=imagens[0] if imagens else None,
+                ),
+                {"tipo": "faixa", "titulo": titulo},
+            )
+            return
+
+        # Mesmo artista principal, faixas diferentes.
+        principais = {
+            (e["playback"].get("artists") or "").split(", ")[0].strip() for e in tocando
+        }
+        if len(principais) == 1:
+            artista = principais.pop()
+            if not artista:
+                return
+            chave = f"{SYNC_PREFIX}artist:{artista}"
+            if await self._sync_recente(chave, agora, SYNC_COOLDOWN_ARTIST_MS):
+                return
+
+            await self._anunciar_sync(
+                channel,
+                chave,
+                agora,
+                build_sync_embed("artist", nomes, artista, imagem=imagens[0] if imagens else None),
+                {"tipo": "artista", "titulo": artista},
+            )
+
+    async def _sync_recente(self, chave: str, agora: int, cooldown_ms: int) -> bool:
+        """True se essa coincidencia ja foi anunciada ha pouco.
+
+        A marca fica no banco, entao um restart nao faz o bot repetir o anuncio.
+        """
+        anterior = await self._store.get_value(chave)
+        if anterior is None:
+            return False
+        try:
+            return agora - int(anterior) < cooldown_ms
+        except ValueError:
+            return False
+
+    async def _anunciar_sync(
+        self,
+        channel: Any,
+        chave: str,
+        agora: int,
+        embed: discord.Embed,
+        contexto: Dict[str, Any],
+    ) -> None:
+        try:
+            await channel.send(embed=embed)
+        except discord.HTTPException as exc:
+            self._logger.warning(
+                "Falha ao anunciar sintonia",
+                extra={"context": {"error": str(exc)}},
+            )
+            return
+
+        await self._store.set_value(chave, str(agora))
+        self._logger.info("Sintonia anunciada", extra={"context": contexto})
+
+    # ------------------------------------------------------------------ #
     # Painel fixado
     # ------------------------------------------------------------------ #
 
     async def refresh_panel(self) -> None:
-        if self._discord is None or time.time() < self._rate_limited_until:
+        if self._discord is None:
             return
+        if self._api.guard.blocked():
+            await self._avisar_bloqueio_no_painel()
+            return
+        self._blocked_notice = None
 
         channel = self._discord.get_channel(self._channel_id)
         if channel is None:
@@ -1173,6 +1454,8 @@ class SpotifyListener:
         entries = await self._collect_playback()
         if not entries:
             return
+
+        await self._check_sync(channel, entries)
 
         fingerprint = panel_fingerprint(entries)
         message = await self._get_panel_message(channel)
@@ -1205,6 +1488,34 @@ class SpotifyListener:
 
         self._panel_fingerprint = fingerprint
 
+    async def _avisar_bloqueio_no_painel(self) -> None:
+        """Sem isso o painel congela calado e parece que o bot caiu."""
+        if self._blocked_notice == self._api.guard.until:
+            return
+
+        channel = self._discord.get_channel(self._channel_id)
+        if channel is None:
+            return
+        message = await self._get_panel_message(channel)
+        if message is None or not message.embeds:
+            return
+
+        embed = message.embeds[0]
+        embed.set_footer(
+            text=f"⏸️ Spotify em pausa até {self._bloqueado_ate()} — "
+            "o painel volta a atualizar sozinho."
+        )
+        try:
+            await message.edit(embed=embed)
+        except discord.HTTPException as exc:
+            self._logger.warning(
+                "Falha ao marcar pausa no painel",
+                extra={"context": {"error": str(exc)}},
+            )
+            return
+        self._blocked_notice = self._api.guard.until
+        self._panel_fingerprint = None  # ao voltar, redesenha o painel inteiro
+
     async def _get_panel_message(self, channel: Any) -> Optional[discord.Message]:
         if self._panel_message is not None:
             return self._panel_message
@@ -1231,15 +1542,19 @@ class SpotifyListener:
     # ------------------------------------------------------------------ #
 
     async def sync_recent_plays(self) -> None:
-        if time.time() < self._rate_limited_until:
+        if self._api.guard.blocked():
             return
 
+        agora = time.time()
         for account in await self._store.list_accounts():
             if account.needs_reauth:
+                continue
+            if agora < self._forbidden_until.get(account.discord_user_id, 0):
                 continue
             try:
                 await self._sync_account(account)
             except SpotifyForbidden as exc:
+                self._forbidden_until[account.discord_user_id] = time.time() + POLL_NEGADO_S
                 self._logger.warning(
                     "Coleta bloqueada: Spotify negou o acesso a conta",
                     extra={
@@ -1256,10 +1571,9 @@ class SpotifyListener:
                     extra={"context": {"discord_user_id": str(account.discord_user_id)}},
                 )
             except SpotifyRateLimited as exc:
-                self._rate_limited_until = time.time() + exc.retry_after
                 self._logger.warning(
-                    "Coleta pausada por rate limit",
-                    extra={"context": {"retry_after": exc.retry_after}},
+                    "Coleta pausada pelo bloqueio do Spotify",
+                    extra={"context": {"retry_after": exc.retry_after, "reason": exc.reason}},
                 )
                 return
             except SpotifyUnavailable as exc:

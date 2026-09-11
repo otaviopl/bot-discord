@@ -160,3 +160,21 @@ class TestLotes:
 
         assert max(tamanhos) <= 40, "nenhum lote pode passar de 40 URIs"
         assert sum(tamanhos) == 100  # 50 faixas × 2 pessoas
+
+
+class TestBloqueio:
+    async def test_curtidas_durante_bloqueio_nao_chama_e_diz_quando_volta(self, env):
+        await com_escutas_em_comum(env)
+        await env["listener"]._api.guard.block(33715, "QUOTA_EXCEEDED")
+        chamadas = []
+
+        def handler(request):
+            chamadas.append(1)
+            return httpx.Response(200, json=[])
+
+        env["respostas"]["library"] = handler
+
+        await env["listener"].handle_message(env["discord"], mensagem(env, "!curtidas tudo"))
+
+        assert chamadas == []
+        assert "em pausa" in env["canal"].sent[0].title

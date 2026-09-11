@@ -254,6 +254,41 @@ def panel_fingerprint(entries: List[Dict[str, Any]]) -> str:
     return "||".join(parts)
 
 
+def build_sync_embed(
+    kind: str,
+    nomes: List[str],
+    titulo: str,
+    subtitulo: Optional[str] = None,
+    url: Optional[str] = None,
+    imagem: Optional[str] = None,
+) -> discord.Embed:
+    """Aviso de que os dois estao ouvindo a mesma coisa agora.
+
+    Sem mencao aos usuarios: o canal e privado e a graca e a coincidencia, nao a
+    notificacao no celular de ninguem.
+    """
+    dupla = " e ".join(nomes)
+
+    if kind == "track":
+        titulo_embed = "🎧 Sintonia"
+        nome_faixa = f"[{titulo}]({url})" if url else f"**{titulo}**"
+        descricao = f"{dupla} estão ouvindo {nome_faixa} agora."
+        if subtitulo:
+            descricao += f"\n{subtitulo}"
+    else:
+        titulo_embed = "🎤 Mesmo artista"
+        descricao = f"{dupla} estão ouvindo **{titulo}** agora, em faixas diferentes."
+
+    embed = discord.Embed(
+        title=titulo_embed,
+        description=descricao,
+        color=SPOTIFY_GREEN,
+    )
+    if imagem:
+        embed.set_thumbnail(url=imagem)
+    return embed
+
+
 def build_top_embed(
     display_name: str,
     period: str,
