@@ -64,7 +64,10 @@ def env(tmp_path):
                 return httpx.Response(200, json={"items": [], "cursors": None})
             return resposta(request) if callable(resposta) else resposta
         if path.startswith("/v1/me/top/"):
-            return respostas["top"] or httpx.Response(200, json={"items": []})
+            resposta = respostas["top"]
+            if resposta is None:
+                return httpx.Response(200, json={"items": []})
+            return resposta(request) if callable(resposta) else resposta
         return httpx.Response(404)
 
     http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
@@ -105,6 +108,16 @@ async def conectar(store: SpotifyStore, user_id: int, nome: str = "Conta") -> No
         user_id, f"sp-{user_id}", nome, "access", "refresh",
         int(time.time()) + 3600, "scope", int(time.time()),
     )
+
+
+def proximo_tick(listener) -> None:
+    """Simula a chegada do próximo tick: a agenda adaptativa venceu para todos.
+
+    Sem isso, duas chamadas seguidas ao painel reaproveitam a leitura em cache —
+    que é justamente o comportamento certo em produção.
+    """
+    listener._panel_fingerprint = None
+    listener._next_poll.clear()
 
 
 def mensagem(env, texto: str, autor_id: int = USER_A, canal=None, anexos=None) -> FakeMessage:
@@ -241,6 +254,7 @@ class TestPainel:
         env["respostas"]["currently_playing"] = httpx.Response(
             200, json=track_payload("track-2", "As It Was")
         )
+        proximo_tick(env["listener"])
         await env["listener"].refresh_panel()
 
         assert painel.edits == 1
@@ -254,7 +268,7 @@ class TestPainel:
         painel = list(env["canal"].messages.values())[0]
 
         # simula restart: o estado em memória se perde, canal e banco permanecem
-        env["listener"]._panel_fingerprint = None
+        proximo_tick(env["listener"])
         env["listener"]._panel_message = None
         env["respostas"]["currently_playing"] = httpx.Response(
             200, json=track_payload("track-9", "Outra")
@@ -274,6 +288,7 @@ class TestPainel:
         env["respostas"]["currently_playing"] = httpx.Response(
             200, json=track_payload("track-2", "Outra")
         )
+        proximo_tick(env["listener"])
         await env["listener"].refresh_panel()  # tenta editar, leva NotFound e limpa o estado
         await env["listener"].refresh_panel()  # recria
 
@@ -288,7 +303,7 @@ class TestPainel:
 
         env["canal"].messages.clear()
         env["listener"]._panel_message = None       # estado em memória some no restart
-        env["listener"]._panel_fingerprint = None
+        proximo_tick(env["listener"])
         await env["listener"].refresh_panel()
 
         assert len(env["canal"].sent) == 2
@@ -308,7 +323,7 @@ class TestPainel:
         await env["listener"].refresh_panel()
 
         env["respostas"]["currently_playing"] = httpx.Response(503)
-        env["listener"]._panel_fingerprint = None
+        proximo_tick(env["listener"])
         await env["listener"].refresh_panel()
 
         painel = list(env["canal"].messages.values())[0]
@@ -434,7 +449,7 @@ class TestColeta:
 
         await env["listener"].sync_recent_plays()
 
-        assert env["listener"]._rate_limited_until > time.time()
+        assert env["listener"]._api.guard.blocked()
 
     async def test_item_sem_id_de_faixa_e_ignorado(self, env):
         await conectar(env["store"], USER_A)

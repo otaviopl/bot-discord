@@ -8,7 +8,7 @@ from bot.spotify_listener import SYNC_PREFIX
 
 # `env` é a fixture compartilhada com os testes do listener — importada de propósito.
 from tests.test_spotify_listener import (  # noqa: F401
-    USER_A, USER_B, conectar, env, mensagem, track_payload,
+    USER_A, USER_B, conectar, env, mensagem, proximo_tick, track_payload,
 )
 
 
@@ -67,7 +67,7 @@ class TestMesmaFaixa:
         )
 
         await env["listener"].refresh_panel()
-        env["listener"]._panel_fingerprint = None
+        proximo_tick(env["listener"])
         await env["listener"].refresh_panel()
 
         avisos = [e for e in env["canal"].sent if getattr(e, "title", "") == "🎧 Sintonia"]
@@ -87,7 +87,7 @@ class TestMesmaFaixa:
         env["respostas"]["currently_playing"] = sequencia(
             tocando("t1", "Cinema"), tocando("t1", "Cinema")
         )
-        env["listener"]._panel_fingerprint = None
+        proximo_tick(env["listener"])
         await env["listener"].refresh_panel()
 
         avisos = [e for e in env["canal"].sent if getattr(e, "title", "") == "🎧 Sintonia"]
@@ -102,8 +102,9 @@ class TestMesmaFaixa:
         await env["listener"].refresh_panel()
 
         # simula restart: estado em memória some, banco fica
-        env["listener"]._panel_fingerprint = None
+        proximo_tick(env["listener"])
         env["listener"]._panel_message = None
+        env["listener"]._playback_cache.clear()
         env["respostas"]["currently_playing"] = sequencia(
             tocando("t1", "Cinema"), tocando("t1", "Cinema")
         )
@@ -181,7 +182,7 @@ class TestMesmoArtista:
                 tocando(f"a{i}", f"Faixa {i}", "Harry Styles"),
                 tocando(f"b{i}", f"Outra {i}", "Harry Styles"),
             )
-            env["listener"]._panel_fingerprint = None
+            proximo_tick(env["listener"])
             await env["listener"].refresh_panel()
 
         avisos = [e for e in env["canal"].sent if getattr(e, "title", "") == "🎤 Mesmo artista"]

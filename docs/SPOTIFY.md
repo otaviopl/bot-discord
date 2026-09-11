@@ -25,8 +25,8 @@ Automático:
   tick do painel, sem requisição extra; pausado não conta. Uma mesma faixa não repete o
   aviso por 3 horas, e um mesmo artista por 8 — senão ouvir um álbum junto viraria um
   aviso por faixa. A trava fica no banco, então reiniciar o bot não repete nada.
-- **Painel fixado** no canal, atualizado a cada 60s. Só edita a mensagem quando o conteúdo muda.
-- **Coleta** do histórico recente a cada 2 minutos.
+- **Painel fixado** no canal. Só edita a mensagem quando o conteúdo muda.
+- **Coleta** do histórico recente a cada 15 minutos.
 - **Resumo semanal** aos domingos, 20h de Brasília, cobrindo os 7 dias anteriores.
 
 Períodos aceitos em `!top`: `4-semanas` (padrão), `6-meses`, `1-ano`.
@@ -43,7 +43,8 @@ A semana vai de segunda 00:00 a domingo 23:59:59, no fuso de Brasília.
 
 O endpoint de [histórico recente](https://developer.spotify.com/documentation/web-api/reference/get-recently-played)
 devolve no máximo as últimas 50 faixas. Se vocês ouvirem mais de 50 músicas entre duas coletas
-(intervalo de 2 minutos), as mais antigas se perdem. Na prática isso não acontece, mas é por isso
+(intervalo de 15 minutos), as mais antigas se perdem — 50 faixas são ~2h30 de música,
+então na prática isso não acontece. Mas é por isso
 que o rodapé dos embeds avisa que pode haver lacunas.
 
 O bot **não** tem acesso a minutos exatos de escuta, dados do Wrapped, nem ao histórico anterior
@@ -127,6 +128,48 @@ Reimportar o mesmo arquivo não duplica nada.
 
 Não inventa histórico anterior à conexão sem o import, não mostra minutos como se fossem
 exatos quando são estimados, e não busca dados de Wrapped — que não existem na API.
+
+---
+
+## 1.2 Cota do Spotify
+
+Em Development Mode, além do rate limit de 30 segundos, existe desde julho de 2026 uma
+**cota por conta de desenvolvedor** — somada entre **todos os apps** da mesma conta. O
+Spotify não publica o número. Quando ela estoura, a resposta é `429` com
+`reason: QUOTA_EXCEEDED` e um `Retry-After` de horas (em produção já vimos 33.715 s, ou
+9h22). O bloqueio vale para o app inteiro, não para o comando nem para a pessoa.
+
+O bot foi desenhado em torno disso:
+
+| Mecanismo | O que evita |
+| --- | --- |
+| Bloqueio compartilhado | Depois de um 429, nenhuma chamada sai até o prazo acabar — nem de comando |
+| Bloqueio persistido no banco | Um restart (todo deploy) esquecer o bloqueio e voltar a bater |
+| Polling adaptativo do painel | Consultar a cada minuto quem nem está ouvindo |
+| Coleta a cada 15 min | `recently-played` guarda 50 faixas (~2h30), então 15 min não perde nada |
+| Pausa de 30 min após 403 | Insistir numa conta que o Spotify está recusando |
+| Cache de 6h do `!top` | O Spotify recalcula os tops no máximo uma vez por dia |
+
+Cadência do painel, por pessoa:
+
+| Estado | Próxima consulta |
+| --- | --- |
+| Tocando | 60 s |
+| Pausado | 2 min |
+| Parado, anúncio ou podcast | 5 min |
+| Spotify fora do ar | 2 min |
+| Recusado (403) | 30 min |
+
+Consumo estimado, para duas pessoas que ouvem ~4 h por dia: **~1.150 chamadas/dia**,
+contra ~4.400 do desenho anterior.
+
+Durante um bloqueio, o painel ganha um aviso no rodapé com o horário de volta, e os
+comandos respondem dizendo quando o Spotify libera em vez de mostrar segundos crus.
+`!minutos`, `!comparar` e o resumo semanal continuam funcionando, porque só usam o banco.
+O `!top` serve o último ranking guardado, se houver.
+
+> Se você tiver outros apps na mesma conta de desenvolvedor do Spotify, eles gastam da
+> mesma cota.
 
 ---
 
@@ -350,7 +393,7 @@ docker compose start
 | Música pausada | Painel mostra "Pausado" com a faixa |
 | Anúncio ou podcast | Painel identifica e não registra como música |
 | Spotify fora do ar | Mantém o último dado conhecido com o horário: "Dados indisponíveis · último às 14:32" |
-| Rate limit (429) | Respeita o `Retry-After` e pausa painel e coleta até o prazo passar |
+| Rate limit ou cota (429) | Bloqueia todas as chamadas até o prazo, persiste o bloqueio no banco e avisa no painel quando volta |
 | Autorização revogada (401) | Marca a conta, mostra "rode `!conectar`" e para de consultar aquela pessoa |
 | Conta não cadastrada no app (403) | Explica que falta o cadastro em User Management; **não** pede reconexão, porque reconectar não resolve |
 | Painel apagado | Recria e fixa na próxima atualização |

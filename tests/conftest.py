@@ -41,6 +41,11 @@ class FakeMessageRef:
     async def pin(self) -> None:
         self.pinned = True
 
+    @property
+    def embeds(self) -> List[Any]:
+        """Como no discord.Message real: lista de embeds da mensagem."""
+        return [self.embed] if self.embed is not None else []
+
 
 class FakeChannel:
     def __init__(self, channel_id: int) -> None:
