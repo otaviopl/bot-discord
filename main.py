@@ -5,6 +5,7 @@ from bot.calendar_client import CalendarClient
 from bot.calendar_listener import CalendarListener
 from bot.client import VoiceWatcherClient
 from bot.config import Settings
+from bot.jarvis_ponte import JarvisPonte
 from bot.julgar_listener import JulgarListener
 from bot.logger import configure_logging
 from bot.notion_client import NotionClient
@@ -138,6 +139,11 @@ def main() -> None:
             "SPOTIFY_GUILD_ID, SPOTIFY_CHANNEL_ID, SPOTIFY_USER_IDS e SPOTIFY_ENCRYPTION_KEY)"
         )
 
+    jarvis_ponte = None
+    if settings.jarvis_enabled:
+        jarvis_ponte = JarvisPonte(settings.jarvis_url, settings.jarvis_segredo, settings.jarvis_dono_id)
+        logger.info("Ponte para o Jarvis ligada")
+
     client = VoiceWatcherClient(
         voice_listener=voice_listener,
         julgar_listener=julgar_listener,
@@ -147,6 +153,7 @@ def main() -> None:
         spotify_listener=spotify_listener,
         target_user_id=settings.target_user_id,
         tz_name=settings.calendar_timezone,
+        jarvis_ponte=jarvis_ponte,
     )
     client.run(settings.discord_bot_token, log_handler=None)
 

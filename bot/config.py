@@ -34,6 +34,14 @@ class Settings:
     spotify_user_ids: tuple[int, ...] = ()
     spotify_db_path: str = "/data/spotify.db"
     spotify_encryption_key: Optional[str] = None
+    # Ponte para o Jarvis (opcional): repassa as DMs do dono ao jarvis-central
+    jarvis_url: Optional[str] = None
+    jarvis_segredo: Optional[str] = None
+    jarvis_dono_id: Optional[int] = None
+
+    @property
+    def jarvis_enabled(self) -> bool:
+        return bool(self.jarvis_url and self.jarvis_segredo and self.jarvis_dono_id)
 
     @property
     def spotify_enabled(self) -> bool:
@@ -86,6 +94,10 @@ class Settings:
         spotify_db_path = os.getenv("SPOTIFY_DB_PATH", "/data/spotify.db")
         spotify_encryption_key = os.getenv("SPOTIFY_ENCRYPTION_KEY") or None
 
+        jarvis_url = os.getenv("JARVIS_URL") or None
+        jarvis_segredo = os.getenv("JARVIS_SEGREDO") or None
+        jarvis_dono_id = _optional_int_env("JARVIS_DONO_ID")
+
         return cls(
             discord_bot_token=token,
             voice_channel_ids=voice_channel_ids,
@@ -112,6 +124,9 @@ class Settings:
             spotify_user_ids=spotify_user_ids,
             spotify_db_path=spotify_db_path,
             spotify_encryption_key=spotify_encryption_key,
+            jarvis_url=jarvis_url,
+            jarvis_segredo=jarvis_segredo,
+            jarvis_dono_id=jarvis_dono_id,
         )
 
 
