@@ -143,6 +143,19 @@ def main() -> None:
     if settings.jarvis_enabled:
         jarvis_ponte = JarvisPonte(settings.jarvis_url, settings.jarvis_segredo, settings.jarvis_dono_id)
         logger.info("Ponte para o Jarvis ligada")
+    else:
+        faltando = [
+            nome
+            for nome, valor in (
+                ("JARVIS_URL", settings.jarvis_url),
+                ("JARVIS_SEGREDO", settings.jarvis_segredo),
+                ("JARVIS_DONO_ID", settings.jarvis_dono_id),
+            )
+            if not valor
+        ]
+        # Configuração pela metade não pode ficar em silêncio: foi o que escondeu a ponte em 08/10.
+        if len(faltando) < 3:
+            logger.warning("Ponte para o Jarvis desligada: faltam variáveis", extra={"context": {"faltando": faltando}})
 
     client = VoiceWatcherClient(
         voice_listener=voice_listener,
