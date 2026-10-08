@@ -9,6 +9,7 @@ import discord
 from discord.ext import tasks
 
 from .calendar_listener import CalendarListener
+from .jarvis_ponte import JarvisPonte
 from .julgar_listener import JulgarListener
 from .notion_client import NotionClient
 from .shift_manager import (
@@ -132,6 +133,7 @@ class VoiceWatcherClient(discord.Client):
         spotify_listener: Optional[SpotifyListener] = None,
         target_user_id: Optional[int] = None,
         tz_name: str = "America/Sao_Paulo",
+        jarvis_ponte: Optional[JarvisPonte] = None,
     ) -> None:
         intents = discord.Intents.none()
         intents.guilds = True
@@ -149,6 +151,7 @@ class VoiceWatcherClient(discord.Client):
         self._timer_manager = timer_manager or TimerManager()
         self._calendar_listener = calendar_listener
         self._spotify_listener = spotify_listener
+        self._jarvis_ponte = jarvis_ponte
         self._target_user_id = target_user_id
         self._tz_name = tz_name
         self._tz = ZoneInfo(tz_name)
@@ -240,6 +243,13 @@ class VoiceWatcherClient(discord.Client):
 
     async def on_message(self, message: discord.Message) -> None:
         if message.author.bot:
+            return
+
+        # DM do Otávio que não é comando vai para o Jarvis, que responde por este bot.
+        if self._jarvis_ponte is not None and self._jarvis_ponte.deve_encaminhar(
+            message, isinstance(message.channel, discord.DMChannel)
+        ):
+            await self._jarvis_ponte.encaminhar(message)
             return
 
         cmd = message.content.strip().lower()
