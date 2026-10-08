@@ -94,8 +94,9 @@ class Settings:
         spotify_db_path = os.getenv("SPOTIFY_DB_PATH", "/data/spotify.db")
         spotify_encryption_key = os.getenv("SPOTIFY_ENCRYPTION_KEY") or None
 
-        jarvis_url = os.getenv("JARVIS_URL") or None
-        jarvis_segredo = os.getenv("JARVIS_SEGREDO") or None
+        # strip: espaço e quebra de linha sobram com frequência quando o valor é colado num painel.
+        jarvis_url = (os.getenv("JARVIS_URL") or "").strip() or None
+        jarvis_segredo = (os.getenv("JARVIS_SEGREDO") or "").strip() or None
         jarvis_dono_id = _optional_int_env("JARVIS_DONO_ID")
 
         return cls(

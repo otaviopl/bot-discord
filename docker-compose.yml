@@ -40,6 +40,9 @@ services:
       SPOTIFY_USER_IDS: ${SPOTIFY_USER_IDS:-}
       SPOTIFY_DB_PATH: ${SPOTIFY_DB_PATH:-/data/spotify.db}
       SPOTIFY_ENCRYPTION_KEY: ${SPOTIFY_ENCRYPTION_KEY:-}
+      JARVIS_URL: ${JARVIS_URL:-}
+      JARVIS_SEGREDO: ${JARVIS_SEGREDO:-}
+      JARVIS_DONO_ID: ${JARVIS_DONO_ID:-}
 
 volumes:
   bot-data:
